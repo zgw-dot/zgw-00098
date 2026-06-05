@@ -44,10 +44,17 @@ router.get('/check', authenticate, async (req, res) => {
       ORDER BY a.id
     `);
     const adjustments = await queryAll(`
-      SELECT ba.*, d.name as department_name, u.username as user_name
+      SELECT ba.*, 
+             d.name as department_name, 
+             u.username as user_name,
+             ru.username as reversed_by_name,
+             oa.adjustment_type as original_adjustment_type,
+             oa.reason as original_reason
       FROM budget_adjustments ba
       LEFT JOIN departments d ON ba.department_id = d.id
       LEFT JOIN users u ON ba.user_id = u.id
+      LEFT JOIN users ru ON ba.reversed_by = ru.id
+      LEFT JOIN budget_adjustments oa ON oa.id = ba.reversal_of_id
       ORDER BY ba.created_at
     `);
 
@@ -57,13 +64,41 @@ router.get('/check', authenticate, async (req, res) => {
       3: 50000.00
     };
 
+    const getAdjustmentDelta = (adj) => {
+      const amount = parseFloat(adj.amount);
+      if (adj.adjustment_type === 'increase') {
+        return amount;
+      } else if (adj.adjustment_type === 'decrease') {
+        return -amount;
+      } else if (adj.adjustment_type === 'reversal') {
+        const originalType = adj.original_adjustment_type;
+        if (originalType === 'increase') {
+          return -amount;
+        } else if (originalType === 'decrease') {
+          return amount;
+        }
+      }
+      return 0;
+    };
+
+    const getAdjustmentSymbol = (adj) => {
+      if (adj.adjustment_type === 'increase') return '+';
+      if (adj.adjustment_type === 'decrease') return '-';
+      if (adj.adjustment_type === 'reversal') {
+        const originalType = adj.original_adjustment_type;
+        if (originalType === 'increase') return '-';
+        if (originalType === 'decrease') return '+';
+      }
+      return '';
+    };
+
     for (const adj of adjustments) {
       const budgetBefore = parseFloat(adj.budget_before);
       const budgetAfter = parseFloat(adj.budget_after);
       const amount = parseFloat(adj.amount);
-      const expectedAfter = adj.adjustment_type === 'increase'
-        ? budgetBefore + amount
-        : budgetBefore - amount;
+      const delta = getAdjustmentDelta(adj);
+      const expectedAfter = budgetBefore + delta;
+      const symbol = getAdjustmentSymbol(adj);
 
       const adjResult = {
         id: adj.id,
@@ -76,6 +111,12 @@ router.get('/check', authenticate, async (req, res) => {
         user_name: adj.user_name,
         reason: adj.reason,
         created_at: adj.created_at,
+        is_reversed: adj.is_reversed ? true : false,
+        reversed_by_name: adj.reversed_by_name,
+        reversed_at: adj.reversed_at,
+        reversal_reason: adj.reversal_reason,
+        reversal_of_id: adj.reversal_of_id,
+        original_reason: adj.original_reason,
         amount_consistent: Math.abs(budgetAfter - expectedAfter) < 0.01
       };
 
@@ -83,7 +124,7 @@ router.get('/check', authenticate, async (req, res) => {
         results.inconsistencies.push({
           type: 'budget_adjustment_mismatch',
           adjustment_id: adj.id,
-          message: `预算调整 #${adj.id} 金额不一致: 调整前 ${budgetBefore.toFixed(2)} ${adj.adjustment_type === 'increase' ? '+' : '-'} ${amount.toFixed(2)} 应为 ${expectedAfter.toFixed(2)}，实际 ${budgetAfter.toFixed(2)}`
+          message: `预算调整 #${adj.id} 金额不一致: 调整前 ${budgetBefore.toFixed(2)} ${symbol} ${amount.toFixed(2)} 应为 ${expectedAfter.toFixed(2)}，实际 ${budgetAfter.toFixed(2)}`
         });
         results.overallConsistent = false;
       }
@@ -95,11 +136,7 @@ router.get('/check', authenticate, async (req, res) => {
       const deptAdjustments = adjustments.filter(a => a.department_id === dept.id);
       let calculatedTotal = initialBudgets[dept.id] || 0;
       for (const adj of deptAdjustments) {
-        if (adj.adjustment_type === 'increase') {
-          calculatedTotal += parseFloat(adj.amount);
-        } else {
-          calculatedTotal -= parseFloat(adj.amount);
-        }
+        calculatedTotal += getAdjustmentDelta(adj);
       }
       dept.calculated_budget_total = parseFloat(calculatedTotal.toFixed(2));
     }
@@ -214,6 +251,10 @@ router.get('/check', authenticate, async (req, res) => {
     const totalAdjustmentsDecrease = adjustments
       .filter(a => a.adjustment_type === 'decrease')
       .reduce((sum, a) => sum + parseFloat(a.amount), 0);
+    const totalAdjustmentsReversal = adjustments
+      .filter(a => a.adjustment_type === 'reversal')
+      .reduce((sum, a) => sum + parseFloat(a.amount), 0);
+    const totalReversedCount = adjustments.filter(a => a.is_reversed).length;
 
     results.summary = {
       total_budget: totalExpected,
@@ -224,6 +265,8 @@ router.get('/check', authenticate, async (req, res) => {
       budget_adjustment_count: adjustments.length,
       total_adjustments_increase: parseFloat(totalAdjustmentsIncrease.toFixed(2)),
       total_adjustments_decrease: parseFloat(totalAdjustmentsDecrease.toFixed(2)),
+      total_adjustments_reversal: parseFloat(totalAdjustmentsReversal.toFixed(2)),
+      total_reversed_count: totalReversedCount,
       status_breakdown: {
         pending: applications.filter(a => a.status === 'pending').length,
         approved: applications.filter(a => a.status === 'approved').length,
@@ -268,12 +311,21 @@ router.get('/export', authenticate, requireFinance, async (req, res) => {
              ba.budget_before,
              ba.budget_after,
              ba.reason,
+             ba.is_reversed,
+             ba.reversed_at,
+             ba.reversal_reason,
+             ba.reversal_of_id,
              d.name as department,
              u.username as operator,
+             ru.username as reversed_by,
+             oa.reason as original_reason,
+             oa.created_at as original_created_at,
              ba.created_at
       FROM budget_adjustments ba
       LEFT JOIN departments d ON ba.department_id = d.id
       LEFT JOIN users u ON ba.user_id = u.id
+      LEFT JOIN users ru ON ba.reversed_by = ru.id
+      LEFT JOIN budget_adjustments oa ON oa.id = ba.reversal_of_id
       ORDER BY ba.created_at DESC
     `);
 
@@ -287,7 +339,46 @@ router.get('/export', authenticate, requireFinance, async (req, res) => {
 
     const typeMap = {
       'increase': '追加预算',
-      'decrease': '调减预算'
+      'decrease': '调减预算',
+      'reversal': '冲正调整'
+    };
+
+    const getAmountDisplay = (adj) => {
+      const amount = parseFloat(adj.amount).toFixed(2);
+      if (adj.adjustment_type === 'increase') {
+        return '+' + amount;
+      } else if (adj.adjustment_type === 'decrease') {
+        return '-' + amount;
+      } else if (adj.adjustment_type === 'reversal') {
+        if (adj.original_reason && adj.original_created_at) {
+          const originalAdj = adjustments.find(a => a.id === adj.reversal_of_id);
+          if (originalAdj && originalAdj.adjustment_type === 'increase') {
+            return '-' + amount;
+          } else {
+            return '+' + amount;
+          }
+        }
+        return '±' + amount;
+      }
+      return amount;
+    };
+
+    const getStatusDisplay = (adj) => {
+      const baseType = typeMap[adj.adjustment_type] || adj.adjustment_type;
+      if (adj.is_reversed) {
+        return baseType + '(已冲正)';
+      }
+      return baseType;
+    };
+
+    const getReversalInfo = (adj) => {
+      if (adj.adjustment_type === 'reversal' && adj.reversal_of_id) {
+        return `冲正记录 #${adj.reversal_of_id}`;
+      }
+      if (adj.is_reversed && adj.reversed_by && adj.reversal_reason) {
+        return `被 ${adj.reversed_by} 冲正，原因: ${adj.reversal_reason}`;
+      }
+      return '';
     };
 
     const applicationRecords = applications.map(a => ({
@@ -305,28 +396,45 @@ router.get('/export', authenticate, requireFinance, async (req, res) => {
       budget_before: '',
       budget_after: '',
       reason: '',
+      reversal_info: '',
+      reversed_by: '',
+      reversed_at: '',
+      reversal_reason: '',
       created_at: a.created_at,
       updated_at: a.updated_at
     }));
 
-    const adjustmentRecords = adjustments.map(adj => ({
-      record_type: '预算调整',
-      id: adj.id,
-      department: adj.department,
-      applicant: '',
-      amount: (adj.adjustment_type === 'decrease' ? '-' : '+') + parseFloat(adj.amount).toFixed(2),
-      supplier: '',
-      purpose: typeMap[adj.adjustment_type] || adj.adjustment_type,
-      status: typeMap[adj.adjustment_type] || adj.adjustment_type,
-      supervisor: '',
-      finance: '',
-      operator: adj.operator,
-      budget_before: parseFloat(adj.budget_before).toFixed(2),
-      budget_after: parseFloat(adj.budget_after).toFixed(2),
-      reason: adj.reason,
-      created_at: adj.created_at,
-      updated_at: adj.created_at
-    }));
+    const adjustmentRecords = adjustments.map(adj => {
+      const amountDisplay = getAmountDisplay(adj);
+      const statusDisplay = getStatusDisplay(adj);
+      const reversalInfo = getReversalInfo(adj);
+      const purposeDisplay = adj.adjustment_type === 'reversal' 
+        ? `冲正调整 - ${adj.original_reason || '原调整'}`
+        : typeMap[adj.adjustment_type] || adj.adjustment_type;
+
+      return {
+        record_type: '预算调整',
+        id: adj.id,
+        department: adj.department,
+        applicant: '',
+        amount: amountDisplay,
+        supplier: '',
+        purpose: purposeDisplay,
+        status: statusDisplay,
+        supervisor: '',
+        finance: '',
+        operator: adj.operator,
+        budget_before: parseFloat(adj.budget_before).toFixed(2),
+        budget_after: parseFloat(adj.budget_after).toFixed(2),
+        reason: adj.reason,
+        reversal_info: reversalInfo,
+        reversed_by: adj.reversed_by || '',
+        reversed_at: adj.reversed_at || '',
+        reversal_reason: adj.reversal_reason || '',
+        created_at: adj.created_at,
+        updated_at: adj.created_at
+      };
+    });
 
     const allRecords = [...applicationRecords, ...adjustmentRecords].sort((a, b) =>
       new Date(b.created_at) - new Date(a.created_at)
@@ -355,6 +463,10 @@ router.get('/export', authenticate, requireFinance, async (req, res) => {
         { id: 'purpose', title: '用途/类型' },
         { id: 'reason', title: '调整原因' },
         { id: 'status', title: '状态' },
+        { id: 'reversal_info', title: '冲正关系' },
+        { id: 'reversed_by', title: '冲正人' },
+        { id: 'reversed_at', title: '冲正时间' },
+        { id: 'reversal_reason', title: '冲正原因' },
         { id: 'supervisor', title: '审批主管' },
         { id: 'finance', title: '财务确认' },
         { id: 'created_at', title: '创建时间' },

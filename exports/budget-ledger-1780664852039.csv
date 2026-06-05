@@ -1,0 +1,5 @@
+记录类型,编号,部门,申请人,操作人,金额,调整前预算,调整后预算,供应商,用途/类型,调整原因,状态,冲正关系,冲正人,冲正时间,冲正原因,审批主管,财务确认,创建时间,更新时间
+采购申请,1,技术部,zhangsan,,103000,,,reviewer supplier,reviewer locked budget to test reversal conflict,,待审批,,,,,,,2026-06-05 13:07:31,2026-06-05 13:07:31
+预算调整,1,技术部,,qianqi,+1234.56,100000.00,101234.56,,追加预算,reviewer success increase before reversal,追加预算(已冲正),被 qianqi 冲正，原因: reviewer found increase adjustment entered by mistake,qianqi,2026-06-05 13:07:31,reviewer found increase adjustment entered by mistake,,,2026-06-05 13:07:31,2026-06-05 13:07:31
+预算调整,2,技术部,,qianqi,-1234.56,101234.56,100000.00,,冲正调整 - reviewer success increase before reversal,reviewer found increase adjustment entered by mistake,冲正调整,冲正记录 #1,,,,,,2026-06-05 13:07:31,2026-06-05 13:07:31
+预算调整,3,技术部,,qianqi,+5000.00,100000.00,105000.00,,追加预算,reviewer conflict increase before locked spend,追加预算,,,,,,,2026-06-05 13:07:31,2026-06-05 13:07:31

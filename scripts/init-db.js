@@ -92,14 +92,21 @@ db.serialize(() => {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       department_id INTEGER NOT NULL,
       user_id INTEGER NOT NULL,
-      adjustment_type TEXT NOT NULL CHECK(adjustment_type IN ('increase', 'decrease')),
+      adjustment_type TEXT NOT NULL CHECK(adjustment_type IN ('increase', 'decrease', 'reversal')),
       amount DECIMAL(15,2) NOT NULL,
       budget_before DECIMAL(15,2) NOT NULL,
       budget_after DECIMAL(15,2) NOT NULL,
       reason TEXT NOT NULL,
+      is_reversed INTEGER NOT NULL DEFAULT 0,
+      reversed_by INTEGER,
+      reversed_at DATETIME,
+      reversal_reason TEXT,
+      reversal_of_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (department_id) REFERENCES departments(id),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (reversed_by) REFERENCES users(id),
+      FOREIGN KEY (reversal_of_id) REFERENCES budget_adjustments(id)
     )
   `, (err) => {
     if (err) console.error('创建 budget_adjustments 表失败:', err);

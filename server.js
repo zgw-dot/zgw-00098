@@ -57,8 +57,10 @@ app.listen(port, () => {
 ║     GET  /api/departments            - 部门预算               ║
 ║     GET  /api/ledger/check          - 一致性检查             ║
 ║     GET  /api/ledger/export         - 导出CSV账本            ║
-║     POST /api/budget-adjustments    - 财务调整部门预算       ║
-║     GET  /api/budget-adjustments    - 预算调整历史记录       ║
+║     POST /api/budget-adjustments          - 财务调整部门预算     ║
+║     POST /api/budget-adjustments/:id/reverse - 财务冲正调整     ║
+║     GET  /api/budget-adjustments          - 预算调整历史记录     ║
+║     GET  /api/budget-adjustments/:id      - 调整记录详情       ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
   `);

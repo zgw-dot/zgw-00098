@@ -20,7 +20,8 @@ const actionMap = {
 
 const adjustmentTypeMap = {
   'increase': { text: '追加预算', class: 'status-approved' },
-  'decrease': { text: '调减预算', class: 'status-rejected' }
+  'decrease': { text: '调减预算', class: 'status-rejected' },
+  'reversal': { text: '冲正调整', class: 'status-withdrawn' }
 };
 
 async function apiRequest(url, method = 'GET', body = null) {
@@ -481,6 +482,18 @@ async function loadAdjustments(departmentId = '') {
   }
 }
 
+function getAdjustmentAmountDisplay(adj) {
+  if (adj.adjustment_type === 'reversal') {
+    if (adj.original_adjustment_id && adj.original_reason) {
+      return `∓¥${formatCurrency(adj.amount)}`;
+    }
+    return `±¥${formatCurrency(adj.amount)}`;
+  }
+  return adj.adjustment_type === 'increase'
+    ? `+¥${formatCurrency(adj.amount)}`
+    : `-¥${formatCurrency(adj.amount)}`;
+}
+
 function renderAdjustments(adjustments) {
   const container = document.getElementById('adjustmentsList');
 
@@ -496,12 +509,15 @@ function renderAdjustments(adjustments) {
           <th>ID</th>
           <th>部门</th>
           <th>类型</th>
+          <th>状态</th>
           <th>调整金额</th>
           <th>调整前</th>
           <th>调整后</th>
           <th>操作人</th>
           <th>原因</th>
+          <th>冲正信息</th>
           <th>时间</th>
+          ${currentUser.role === 'finance' ? '<th>操作</th>' : ''}
         </tr>
       </thead>
       <tbody>
@@ -509,21 +525,50 @@ function renderAdjustments(adjustments) {
 
   for (const adj of adjustments) {
     const typeInfo = adjustmentTypeMap[adj.adjustment_type] || { text: adj.adjustment_type, class: '' };
-    const amountDisplay = adj.adjustment_type === 'increase'
-      ? `+¥${formatCurrency(adj.amount)}`
-      : `-¥${formatCurrency(adj.amount)}`;
+    const amountDisplay = getAdjustmentAmountDisplay(adj);
+    
+    let statusBadge = '<span class="status-badge status-approved">正常</span>';
+    let reversalInfo = '';
+    let canReverse = false;
+
+    if (adj.is_reversed) {
+      statusBadge = '<span class="status-badge status-withdrawn">已冲正</span>';
+      reversalInfo = `
+        <div style="font-size: 0.85rem; color: #c53030;">
+          <div>冲正人: ${adj.reversed_by_name || '-'}</div>
+          <div>冲正时间: ${adj.reversed_at ? new Date(adj.reversed_at).toLocaleString('zh-CN') : '-'}</div>
+          <div>冲正原因: ${adj.reversal_reason || '-'}</div>
+        </div>
+      `;
+    } else if (adj.adjustment_type === 'reversal') {
+      statusBadge = '<span class="status-badge status-withdrawn">冲正记录</span>';
+      reversalInfo = `
+        <div style="font-size: 0.85rem; color: #d69e2e;">
+          <div>冲正记录 #${adj.original_adjustment_id || '-'}</div>
+          ${adj.original_reason ? `<div>原原因: ${adj.original_reason}</div>` : ''}
+        </div>
+      `;
+    } else if (currentUser.role === 'finance') {
+      canReverse = true;
+    }
 
     html += `
       <tr>
         <td>${adj.id}</td>
         <td>${adj.department_name}</td>
         <td><span class="status-badge ${typeInfo.class}">${typeInfo.text}</span></td>
+        <td>${statusBadge}</td>
         <td>${amountDisplay}</td>
         <td>¥${formatCurrency(adj.budget_before)}</td>
         <td>¥${formatCurrency(adj.budget_after)}</td>
         <td>${adj.user_name}</td>
         <td>${adj.reason}</td>
+        <td>${reversalInfo || '-'}</td>
         <td>${new Date(adj.created_at).toLocaleString('zh-CN')}</td>
+        ${currentUser.role === 'finance' ? `<td>
+          <button class="btn btn-info btn-sm" onclick="viewAdjustmentDetail(${adj.id})">详情</button>
+          ${canReverse ? `<button class="btn btn-warning btn-sm" onclick="showReversalForm(${adj.id}, '${adj.department_name}', ${adj.amount}, '${adj.reason.replace(/'/g, "\\'")}')">冲正</button>` : ''}
+        </td>` : ''}
       </tr>
     `;
   }
@@ -875,6 +920,162 @@ document.getElementById('modal').onclick = (e) => {
   if (e.target.id === 'modal') closeModal();
 };
 
+async function viewAdjustmentDetail(id) {
+  try {
+    const data = await apiRequest(`/budget-adjustments/${id}`);
+    const adj = data.adjustment;
+    const typeInfo = adjustmentTypeMap[adj.adjustment_type] || { text: adj.adjustment_type, class: '' };
+    const amountDisplay = getAdjustmentAmountDisplay(adj);
+
+    let html = `
+      <div class="detail-row">
+        <span class="detail-label">调整编号</span>
+        <span class="detail-value">#${adj.id}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">部门</span>
+        <span class="detail-value">${adj.department_name}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">类型</span>
+        <span class="detail-value"><span class="status-badge ${typeInfo.class}">${typeInfo.text}</span></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">状态</span>
+        <span class="detail-value">
+          ${adj.is_reversed ? '<span class="status-badge status-withdrawn">已冲正</span>' : '<span class="status-badge status-approved">正常</span>'}
+        </span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">调整金额</span>
+        <span class="detail-value">${amountDisplay}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">调整前预算</span>
+        <span class="detail-value">¥${formatCurrency(adj.budget_before)}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">调整后预算</span>
+        <span class="detail-value">¥${formatCurrency(adj.budget_after)}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">操作人</span>
+        <span class="detail-value">${adj.user_name}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">调整原因</span>
+        <span class="detail-value">${adj.reason}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">创建时间</span>
+        <span class="detail-value">${new Date(adj.created_at).toLocaleString('zh-CN')}</span>
+      </div>
+    `;
+
+    if (adj.is_reversed) {
+      html += `
+        <div class="detail-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e2e8f0;">
+          <h4 style="color: #c53030; margin-bottom: 0.5rem;">冲正信息</h4>
+          <div class="detail-row">
+            <span class="detail-label">冲正人</span>
+            <span class="detail-value">${adj.reversed_by_name || '-'}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">冲正时间</span>
+            <span class="detail-value">${adj.reversed_at ? new Date(adj.reversed_at).toLocaleString('zh-CN') : '-'}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">冲正原因</span>
+            <span class="detail-value">${adj.reversal_reason || '-'}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    if (adj.adjustment_type === 'reversal' && adj.original_adjustment_id) {
+      html += `
+        <div class="detail-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e2e8f0;">
+          <h4 style="color: #d69e2e; margin-bottom: 0.5rem;">冲正关联</h4>
+          <div class="detail-row">
+            <span class="detail-label">冲正记录</span>
+            <span class="detail-value">#${adj.original_adjustment_id}</span>
+          </div>
+          ${adj.original_reason ? `
+          <div class="detail-row">
+            <span class="detail-label">原调整原因</span>
+            <span class="detail-value">${adj.original_reason}</span>
+          </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    showModal(`调整详情 #${adj.id}`, html);
+  } catch (err) {
+    console.error('加载调整详情失败:', err);
+  }
+}
+
+function showReversalForm(adjustmentId, departmentName, amount, reason) {
+  const html = `
+    <form id="reversalForm">
+      <div class="form-group">
+        <label>调整记录</label>
+        <input type="text" value="#${adjustmentId} - ${departmentName}" disabled>
+      </div>
+      <div class="form-group">
+        <label>原调整金额</label>
+        <input type="text" value="¥${formatCurrency(amount)}" disabled>
+      </div>
+      <div class="form-group">
+        <label>原调整原因</label>
+        <textarea rows="2" disabled>${reason}</textarea>
+      </div>
+      <div class="form-group">
+        <label>冲正原因 <span style="color: #c53030;">*</span></label>
+        <textarea id="reversalReason" rows="3" required placeholder="请详细说明冲正原因"></textarea>
+      </div>
+      <div style="background: #fffaf0; padding: 0.75rem; border-radius: 0.25rem; margin-bottom: 1rem;">
+        <p style="margin: 0; font-size: 0.9rem; color: #744210;">
+          <strong>⚠ 注意：</strong>冲正操作将反向调整部门预算，该操作不可撤销，请谨慎操作。
+        </p>
+      </div>
+      <div style="text-align: right; margin-top: 1rem;">
+        <button type="button" class="btn" onclick="closeModal()">取消</button>
+        <button type="submit" class="btn btn-warning">确认冲正</button>
+      </div>
+    </form>
+  `;
+
+  showModal(`冲正调整 #${adjustmentId}`, html);
+
+  document.getElementById('reversalForm').onsubmit = async (e) => {
+    e.preventDefault();
+    
+    const reversalReason = document.getElementById('reversalReason').value.trim();
+    if (!reversalReason) {
+      showToast('请输入冲正原因', 'error');
+      return;
+    }
+
+    if (!confirm('确定要冲正此调整记录吗？此操作将反向调整部门预算。')) {
+      return;
+    }
+
+    try {
+      await apiRequest(`/budget-adjustments/${adjustmentId}/reverse`, 'POST', {
+        reason: reversalReason
+      });
+      showToast('冲正成功', 'success');
+      closeModal();
+      loadDepartments();
+      loadAdjustments(document.getElementById('deptFilter').value);
+    } catch (err) {
+      console.error('冲正失败:', err);
+    }
+  };
+}
+
 window.viewApplication = viewApplication;
 window.withdrawApplication = withdrawApplication;
 window.approveApplication = approveApplication;
@@ -882,6 +1083,8 @@ window.rejectApplication = rejectApplication;
 window.confirmApplication = confirmApplication;
 window.closeModal = closeModal;
 window.showAdjustmentForm = showAdjustmentForm;
+window.viewAdjustmentDetail = viewAdjustmentDetail;
+window.showReversalForm = showReversalForm;
 
 if (token && currentUser) {
   apiRequest('/auth/me').then(() => {

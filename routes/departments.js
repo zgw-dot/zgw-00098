@@ -22,25 +22,37 @@ router.get('/', authenticate, async (req, res) => {
       ORDER BY d.name
     `);
 
-    const adjustmentCounts = await queryAll(`
-      SELECT department_id, COUNT(*) as adjustment_count
+    const adjustmentStats = await queryAll(`
+      SELECT department_id, 
+             COUNT(*) as total_count,
+             SUM(CASE WHEN is_reversed = 1 THEN 1 ELSE 0 END) as reversed_count,
+             SUM(CASE WHEN adjustment_type = 'reversal' THEN 1 ELSE 0 END) as reversal_count
       FROM budget_adjustments
       GROUP BY department_id
     `);
 
     const countMap = {};
-    for (const ac of adjustmentCounts) {
-      countMap[ac.department_id] = ac.adjustment_count;
+    for (const as of adjustmentStats) {
+      countMap[as.department_id] = {
+        total: as.total_count,
+        reversed: as.reversed_count,
+        reversal: as.reversal_count,
+        effective: as.total_count - as.reversal_count
+      };
     }
 
-    const departmentsWithStats = departments.map(d => ({
-      ...d,
-      budget_total: parseFloat(d.budget_total),
-      budget_used: parseFloat(d.budget_used),
-      budget_locked: parseFloat(d.budget_locked),
-      budget_available: parseFloat(d.budget_available),
-      adjustment_count: countMap[d.id] || 0
-    }));
+    const departmentsWithStats = departments.map(d => {
+      const stats = countMap[d.id] || { total: 0, reversed: 0, reversal: 0, effective: 0 };
+      return {
+        ...d,
+        budget_total: parseFloat(d.budget_total),
+        budget_used: parseFloat(d.budget_used),
+        budget_locked: parseFloat(d.budget_locked),
+        budget_available: parseFloat(d.budget_available),
+        adjustment_count: stats.total,
+        adjustment_stats: stats
+      };
+    });
 
     res.json({ departments: departmentsWithStats });
   } catch (err) {
