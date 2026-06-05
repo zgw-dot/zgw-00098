@@ -117,6 +117,8 @@ router.get('/check', authenticate, async (req, res) => {
         reversal_reason: adj.reversal_reason,
         reversal_of_id: adj.reversal_of_id,
         original_reason: adj.original_reason,
+        batch_id: adj.batch_id,
+        batch_line: adj.batch_line,
         amount_consistent: Math.abs(budgetAfter - expectedAfter) < 0.01
       };
 
@@ -315,6 +317,8 @@ router.get('/export', authenticate, requireFinance, async (req, res) => {
              ba.reversed_at,
              ba.reversal_reason,
              ba.reversal_of_id,
+             ba.batch_id,
+             ba.batch_line,
              d.name as department,
              u.username as operator,
              ru.username as reversed_by,
@@ -412,6 +416,10 @@ router.get('/export', authenticate, requireFinance, async (req, res) => {
         ? `冲正调整 - ${adj.original_reason || '原调整'}`
         : typeMap[adj.adjustment_type] || adj.adjustment_type;
 
+      const batchInfo = adj.batch_id 
+        ? `${adj.batch_id}${adj.batch_line ? ` #${adj.batch_line}` : ''}`
+        : '';
+
       return {
         record_type: '预算调整',
         id: adj.id,
@@ -431,6 +439,9 @@ router.get('/export', authenticate, requireFinance, async (req, res) => {
         reversed_by: adj.reversed_by || '',
         reversed_at: adj.reversed_at || '',
         reversal_reason: adj.reversal_reason || '',
+        batch_id: adj.batch_id || '',
+        batch_line: adj.batch_line || '',
+        batch_info: batchInfo,
         created_at: adj.created_at,
         updated_at: adj.created_at
       };
@@ -467,6 +478,9 @@ router.get('/export', authenticate, requireFinance, async (req, res) => {
         { id: 'reversed_by', title: '冲正人' },
         { id: 'reversed_at', title: '冲正时间' },
         { id: 'reversal_reason', title: '冲正原因' },
+        { id: 'batch_id', title: '批次号' },
+        { id: 'batch_line', title: '批次行号' },
+        { id: 'batch_info', title: '批次信息' },
         { id: 'supervisor', title: '审批主管' },
         { id: 'finance', title: '财务确认' },
         { id: 'created_at', title: '创建时间' },

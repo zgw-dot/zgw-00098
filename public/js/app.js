@@ -118,9 +118,13 @@ function renderUserInfo() {
   if (currentUser.role !== 'finance') {
     document.getElementById('budgetAdjustmentsTab').style.display = 'none';
     document.getElementById('newAdjustmentBtn').style.display = 'none';
+    document.getElementById('budgetBatchesTab').style.display = 'none';
+    document.getElementById('newBatchBtn').style.display = 'none';
   } else {
     document.getElementById('budgetAdjustmentsTab').style.display = 'inline-block';
     document.getElementById('newAdjustmentBtn').style.display = 'inline-block';
+    document.getElementById('budgetBatchesTab').style.display = 'inline-block';
+    document.getElementById('newBatchBtn').style.display = 'inline-block';
   }
 }
 
@@ -903,6 +907,9 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     if (tab === 'budgetAdjustments' && currentUser.role === 'finance') {
       loadAdjustments(document.getElementById('deptFilter').value);
     }
+    if (tab === 'budgetBatches' && currentUser.role === 'finance') {
+      loadBatches(document.getElementById('batchStatusFilter').value);
+    }
   };
 });
 
@@ -914,6 +921,9 @@ document.getElementById('exportLedgerBtn').onclick = exportLedger;
 document.getElementById('newAdjustmentBtn').onclick = showNewAdjustmentForm;
 document.getElementById('refreshAdjBtn').onclick = () => loadAdjustments(document.getElementById('deptFilter').value);
 document.getElementById('deptFilter').onchange = (e) => loadAdjustments(e.target.value);
+document.getElementById('newBatchBtn').onclick = showNewBatchForm;
+document.getElementById('refreshBatchBtn').onclick = () => loadBatches(document.getElementById('batchStatusFilter').value);
+document.getElementById('batchStatusFilter').onchange = (e) => loadBatches(e.target.value);
 document.querySelector('.close').onclick = closeModal;
 
 document.getElementById('modal').onclick = (e) => {
@@ -1076,6 +1086,375 @@ function showReversalForm(adjustmentId, departmentName, amount, reason) {
   };
 }
 
+async function loadBatches(status = '') {
+  try {
+    const url = status ? `/budget-batches?status=${status}` : '/budget-batches';
+    const data = await apiRequest(url);
+    renderBatches(data.batches);
+  } catch (err) {
+    console.error('加载批次列表失败:', err);
+  }
+}
+
+function renderBatches(batches) {
+  const container = document.getElementById('batchList');
+
+  if (batches.length === 0) {
+    container.innerHTML = '<div class="empty-state">暂无批量调整记录</div>';
+    return;
+  }
+
+  const statusMap = {
+    'pending': { text: '待处理', class: 'status-pending' },
+    'prechecked': { text: '已预检', class: 'status-pending' },
+    'submitted': { text: '已提交', class: 'status-approved' },
+    'completed': { text: '已完成', class: 'status-confirmed' },
+    'failed': { text: '失败', class: 'status-rejected' }
+  };
+
+  let html = `
+    <table>
+      <thead>
+        <tr>
+          <th>批次号</th>
+          <th>状态</th>
+          <th>操作人</th>
+          <th>总行数</th>
+          <th>成功</th>
+          <th>失败</th>
+          <th>总金额</th>
+          <th>创建时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const batch of batches) {
+    const status = statusMap[batch.status] || { text: batch.status, class: '' };
+    html += `
+      <tr>
+        <td>${batch.batch_id}</td>
+        <td><span class="status-badge ${status.class}">${status.text}</span></td>
+        <td>${batch.user_name}</td>
+        <td>${batch.total_rows}</td>
+        <td>${batch.success_rows}</td>
+        <td>${batch.failed_rows}</td>
+        <td>¥${formatCurrency(batch.total_amount)}</td>
+        <td>${new Date(batch.created_at).toLocaleString('zh-CN')}</td>
+        <td>
+          <button class="btn btn-info btn-sm" onclick="viewBatchDetail('${batch.batch_id}')">详情</button>
+          ${batch.status === 'completed' ? `<button class="btn btn-sm" onclick="exportBatch('${batch.batch_id}')">导出</button>` : ''}
+        </td>
+      </tr>
+    `;
+  }
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function showNewBatchForm() {
+  const html = `
+    <form id="batchForm">
+      <div class="form-group">
+        <label>批次号</label>
+        <input type="text" id="batchId" placeholder="BATCH-20240101-001" required>
+      </div>
+      <div class="form-group">
+        <label>上传 CSV 文件</label>
+        <input type="file" id="csvFile" accept=".csv">
+        <p class="hint">CSV 格式: 部门,类型,金额,原因</p>
+        <p class="hint">类型支持: 追加/increase/+ 或 调减/decrease/-</p>
+      </div>
+      <div class="form-group">
+        <label>或直接粘贴 CSV 内容</label>
+        <textarea id="csvText" rows="6" placeholder="部门,类型,金额,原因
+技术部,追加,50000,Q2 设备采购预算
+市场部,调减,20000,活动预算结余回收"></textarea>
+      </div>
+      <div style="text-align: right; margin-top: 1rem;">
+        <button type="button" class="btn" onclick="closeModal()">取消</button>
+        <button type="button" class="btn btn-info" onclick="precheckBatch()">预检</button>
+      </div>
+    </form>
+  `;
+
+  showModal('批量导入预算调整', html);
+  window.currentPrecheckResult = null;
+}
+
+async function precheckBatch() {
+  const batchId = document.getElementById('batchId').value.trim();
+  const csvText = document.getElementById('csvText').value.trim();
+  const csvFile = document.getElementById('csvFile').files[0];
+
+  if (!batchId) {
+    showToast('请输入批次号', 'error');
+    return;
+  }
+
+  try {
+    let data;
+    if (csvFile) {
+      const text = await csvFile.text();
+      data = await apiRequest('/budget-batches/precheck', 'POST', { batchId, csvText: text });
+    } else if (csvText) {
+      data = await apiRequest('/budget-batches/precheck', 'POST', { batchId, csvText });
+    } else {
+      showToast('请上传 CSV 文件或粘贴 CSV 内容', 'error');
+      return;
+    }
+
+    window.currentPrecheckResult = data;
+    renderPrecheckResult(data);
+  } catch (err) {
+    console.error('预检失败:', err);
+  }
+}
+
+function renderPrecheckResult(data) {
+  const batchStatus = data.allValid 
+    ? '<span class="status-badge status-approved">全部通过</span>'
+    : '<span class="status-badge status-rejected">存在错误</span>';
+
+  let html = `
+    <div style="margin-bottom: 1rem;">
+      <div class="detail-row">
+        <span class="detail-label">批次号</span>
+        <span class="detail-value">${data.batchId}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">预检结果</span>
+        <span class="detail-value">${batchStatus}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">总行数</span>
+        <span class="detail-value">${data.totalRows}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">通过</span>
+        <span class="detail-value" style="color: #2f855a;">${data.validRows}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">失败</span>
+        <span class="detail-value" style="color: #c53030;">${data.invalidRows}</span>
+      </div>
+    </div>
+    <div style="max-height: 300px; overflow-y: auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>行号</th>
+            <th>部门</th>
+            <th>类型</th>
+            <th>金额</th>
+            <th>原因</th>
+            <th>当前预算</th>
+            <th>预计调整后</th>
+            <th>结果</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  for (const r of data.results) {
+    const rowClass = r.valid ? '' : 'style="background: #fff5f5;"';
+    const resultBadge = r.valid 
+      ? '<span class="status-badge status-approved">✓ 通过</span>'
+      : `<span class="status-badge status-rejected">✗ ${r.error}</span>`;
+    const typeDisplay = r.adjustmentType === 'increase' ? '追加' : '调减';
+
+    html += `
+      <tr ${rowClass}>
+        <td>${r.lineNumber}</td>
+        <td>${r.department}</td>
+        <td>${typeDisplay}</td>
+        <td>¥${formatCurrency(r.amountNum || r.amount)}</td>
+        <td>${r.reason}</td>
+        <td>${r.currentBudget !== null ? '¥' + formatCurrency(r.currentBudget) : '-'}</td>
+        <td>${r.expectedBudgetAfter !== null ? '¥' + formatCurrency(r.expectedBudgetAfter) : '-'}</td>
+        <td>${resultBadge}</td>
+      </tr>
+    `;
+  }
+
+  html += `
+        </tbody>
+      </table>
+    </div>
+    <div style="text-align: right; margin-top: 1rem;">
+      <button type="button" class="btn" onclick="closeModal()">取消</button>
+      ${data.allValid ? `<button type="button" class="btn btn-primary" onclick="submitBatch()">确认提交</button>` : ''}
+    </div>
+  `;
+
+  document.getElementById('modalBody').innerHTML = html;
+}
+
+async function submitBatch() {
+  if (!window.currentPrecheckResult || !window.currentPrecheckResult.allValid) {
+    showToast('请先完成预检且全部通过', 'error');
+    return;
+  }
+
+  if (!confirm('确定要提交此批次吗？提交后将按批次事务处理，不可撤销。')) {
+    return;
+  }
+
+  try {
+    const data = await apiRequest('/budget-batches/submit', 'POST', {
+      batchId: window.currentPrecheckResult.batchId,
+      rows: window.currentPrecheckResult.results
+    });
+
+    showToast('批次提交成功', 'success');
+    closeModal();
+    loadBatches();
+    loadDepartments();
+    loadAdjustments();
+  } catch (err) {
+    console.error('提交失败:', err);
+  }
+}
+
+async function viewBatchDetail(batchId) {
+  try {
+    const data = await apiRequest(`/budget-batches/${batchId}`);
+    renderBatchDetail(data.batch, data.lines);
+  } catch (err) {
+    console.error('加载批次详情失败:', err);
+  }
+}
+
+function renderBatchDetail(batch, lines) {
+  const statusMap = {
+    'pending': { text: '待处理', class: 'status-pending' },
+    'prechecked': { text: '已预检', class: 'status-pending' },
+    'submitted': { text: '已提交', class: 'status-approved' },
+    'completed': { text: '已完成', class: 'status-confirmed' },
+    'failed': { text: '失败', class: 'status-rejected' },
+    'valid': { text: '有效', class: 'status-approved' },
+    'invalid': { text: '无效', class: 'status-rejected' }
+  };
+
+  const status = statusMap[batch.status] || { text: batch.status, class: '' };
+
+  let html = `
+    <div class="detail-section" style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid #e2e8f0;">
+      <div class="detail-row">
+        <span class="detail-label">批次号</span>
+        <span class="detail-value">${batch.batch_id}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">状态</span>
+        <span class="detail-value"><span class="status-badge ${status.class}">${status.text}</span></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">操作人</span>
+        <span class="detail-value">${batch.user_name}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">总行数</span>
+        <span class="detail-value">${batch.total_rows}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">成功行数</span>
+        <span class="detail-value">${batch.success_rows}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">失败行数</span>
+        <span class="detail-value">${batch.failed_rows}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">总金额</span>
+        <span class="detail-value">¥${formatCurrency(batch.total_amount)}</span>
+      </div>
+      ${batch.error_message ? `
+      <div class="detail-row">
+        <span class="detail-label">错误信息</span>
+        <span class="detail-value" style="color: #c53030;">${batch.error_message}</span>
+      </div>
+      ` : ''}
+      <div class="detail-row">
+        <span class="detail-label">创建时间</span>
+        <span class="detail-value">${new Date(batch.created_at).toLocaleString('zh-CN')}</span>
+      </div>
+    </div>
+    <h4 style="margin-bottom: 0.5rem;">明细行</h4>
+    <div style="max-height: 300px; overflow-y: auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>行号</th>
+            <th>部门</th>
+            <th>类型</th>
+            <th>金额</th>
+            <th>调整前</th>
+            <th>调整后</th>
+            <th>原因</th>
+            <th>状态</th>
+            <th>调整记录ID</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  const typeMap = { 'increase': '追加', 'decrease': '调减' };
+
+  for (const line of lines) {
+    const lineStatus = statusMap[line.status] || { text: line.status, class: '' };
+    html += `
+      <tr>
+        <td>${line.line_number}</td>
+        <td>${line.department_name || line.department}</td>
+        <td>${typeMap[line.adjustment_type] || line.adjustment_type}</td>
+        <td>¥${formatCurrency(line.amount)}</td>
+        <td>${line.budget_before !== null ? '¥' + formatCurrency(line.budget_before) : '-'}</td>
+        <td>${line.budget_after !== null ? '¥' + formatCurrency(line.budget_after) : '-'}</td>
+        <td>${line.reason}</td>
+        <td><span class="status-badge ${lineStatus.class}">${lineStatus.text}</span></td>
+        <td>${line.adjustment_id || '-'}</td>
+      </tr>
+    `;
+  }
+
+  html += `
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  showModal(`批次详情 - ${batch.batch_id}`, html);
+}
+
+async function exportBatch(batchId) {
+  try {
+    const res = await fetch(API_BASE + `/budget-batches/${batchId}/export`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || '导出失败');
+    }
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `batch-${batchId}-${Date.now()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+    
+    showToast('批次导出成功', 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
 window.viewApplication = viewApplication;
 window.withdrawApplication = withdrawApplication;
 window.approveApplication = approveApplication;
@@ -1085,6 +1464,11 @@ window.closeModal = closeModal;
 window.showAdjustmentForm = showAdjustmentForm;
 window.viewAdjustmentDetail = viewAdjustmentDetail;
 window.showReversalForm = showReversalForm;
+window.showNewBatchForm = showNewBatchForm;
+window.precheckBatch = precheckBatch;
+window.submitBatch = submitBatch;
+window.viewBatchDetail = viewBatchDetail;
+window.exportBatch = exportBatch;
 
 if (token && currentUser) {
   apiRequest('/auth/me').then(() => {

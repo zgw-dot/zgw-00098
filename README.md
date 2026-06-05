@@ -22,7 +22,9 @@
 │   ├── auth.js            # 登录认证接口
 │   ├── applications.js    # 申请相关接口（核心业务逻辑）
 │   ├── departments.js     # 部门预算接口
-│   └── ledger.js          # 一致性检查和CSV导出
+│   ├── ledger.js          # 一致性检查和CSV导出
+│   ├── budget-adjustments.js  # 预算调整接口
+│   └── budget-batches.js  # 批量预算调整接口
 ├── scripts/
 │   └── init-db.js         # 数据库初始化脚本
 ├── public/                # 前端静态文件
@@ -78,6 +80,54 @@
 | action | TEXT | 动作: submit/approve/reject/withdraw/confirm |
 | remark | TEXT | 备注 |
 | created_at | DATETIME | 操作时间 |
+
+### budget_adjustments（预算调整表）
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| department_id | INTEGER | 部门ID |
+| user_id | INTEGER | 操作人ID |
+| adjustment_type | TEXT | 类型: increase/decrease/reversal |
+| amount | DECIMAL | 调整金额 |
+| budget_before | DECIMAL | 调整前预算 |
+| budget_after | DECIMAL | 调整后预算 |
+| reason | TEXT | 调整原因 |
+| batch_id | TEXT | 关联批次号（批量调整时） |
+| batch_line | INTEGER | 批次内行号（批量调整时） |
+| created_at | DATETIME | 创建时间 |
+
+### budget_batches（批量调整批次表）
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| batch_id | TEXT | 主键，批次号 |
+| user_id | INTEGER | 操作人ID |
+| status | TEXT | 状态: pending/prechecked/submitted/failed/completed |
+| total_rows | INTEGER | 总行数 |
+| success_rows | INTEGER | 成功行数 |
+| failed_rows | INTEGER | 失败行数 |
+| total_amount | DECIMAL | 总调整金额 |
+| error_message | TEXT | 错误信息 |
+| created_at | DATETIME | 创建时间 |
+| updated_at | DATETIME | 更新时间 |
+
+### budget_batch_lines（批量调整行表）
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| batch_id | TEXT | 批次号（外键） |
+| line_number | INTEGER | 行号 |
+| department_id | INTEGER | 部门ID |
+| department_name | TEXT | 部门名称 |
+| adjustment_type | TEXT | 类型: increase/decrease |
+| amount | DECIMAL | 调整金额 |
+| reason | TEXT | 调整原因 |
+| status | TEXT | 状态: pending/valid/invalid/submitted/failed |
+| validation_error | TEXT | 校验错误信息 |
+| budget_before | DECIMAL | 调整前预算 |
+| budget_after | DECIMAL | 调整后预算 |
+| adjustment_id | INTEGER | 关联调整记录ID |
+| created_at | DATETIME | 创建时间 |
+| updated_at | DATETIME | 更新时间 |
 
 ## 业务流程
 
@@ -169,6 +219,12 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/applications
 | 财务确认 | ❌ | ❌ | ✅ | 只能确认 approved 状态的 |
 | 导出CSV账本 | ❌ | ❌ | ✅ | |
 | 一致性检查 | ✅ | ✅ | ✅ | 所有登录用户 |
+| 预算调整（单笔） | ❌ | ❌ | ✅ | 财务追加/调减预算 |
+| 批量调整预检 | ❌ | ❌ | ✅ | 财务预检批量调整 |
+| 批量调整提交 | ❌ | ❌ | ✅ | 财务提交批量调整（事务处理） |
+| 查看批次列表 | ✅ | ✅ | ✅ | 所有登录用户 |
+| 查看批次详情 | ✅ | ✅ | ✅ | 所有登录用户 |
+| 导出批次CSV | ❌ | ❌ | ✅ | 财务导出批次结果 |
 
 ## API 接口文档
 
@@ -265,6 +321,215 @@ Authorization: Bearer <token>
 # 导出CSV账本（财务）
 GET /api/ledger/export
 Authorization: Bearer <token>
+```
+
+### 预算调整接口（财务）
+
+```bash
+# 单笔预算调整（追加/调减）
+POST /api/budget-adjustments
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "departmentId": 1,
+  "adjustmentType": "increase",  # increase 或 decrease
+  "amount": 50000,
+  "reason": "Q2 设备采购预算追加"
+}
+
+# 获取调整历史
+GET /api/budget-adjustments
+Authorization: Bearer <token>
+```
+
+### 批量调整接口（财务）
+
+#### 1. 批量预检
+
+**财务**可以在提交前先进行预检，系统会返回每行的校验结果和预计调整后余额。
+
+```bash
+POST /api/budget-batches/precheck
+Authorization: Bearer <token>
+Content-Type: application/json
+
+# 方式一：上传 CSV 内容
+{
+  "batchId": "BATCH-2024-001",
+  "csvText": "部门,类型,金额,原因\n技术部,追加,50000,Q2 设备采购\n市场部,调减,10000,活动结余回收"
+}
+
+# 方式二：直接提交数据行
+{
+  "batchId": "BATCH-2024-001",
+  "rows": [
+    { "department": "技术部", "type": "追加", "amount": "50000", "reason": "Q2 设备采购" },
+    { "department": "市场部", "type": "调减", "amount": "10000", "reason": "活动结余回收" }
+  ]
+}
+
+# 响应示例
+{
+  "batchId": "BATCH-2024-001",
+  "totalRows": 2,
+  "validRows": 2,
+  "invalidRows": 0,
+  "allValid": true,
+  "totalAmount": 40000,
+  "results": [
+    {
+      "lineNumber": 1,
+      "department": "技术部",
+      "type": "追加",
+      "amount": "50000",
+      "reason": "Q2 设备采购",
+      "valid": true,
+      "expectedBudgetAfter": 150000
+    },
+    {
+      "lineNumber": 2,
+      "department": "市场部",
+      "type": "调减",
+      "amount": "10000",
+      "reason": "活动结余回收",
+      "valid": true,
+      "expectedBudgetAfter": 70000
+    }
+  ]
+}
+```
+
+**CSV 格式支持**：
+- 表头支持中英文：部门/department, 类型/type, 金额/amount, 原因/reason
+- 类型支持多种格式：追加/increase/+, 调减/decrease/-
+
+**校验规则**：
+- 部门必须存在
+- 金额必须为正数
+- 原因不能为空
+- 调减后预算不能低于已使用 + 锁定金额
+
+#### 2. 批量提交
+
+**预检通过后**才能提交。提交使用数据库事务，任何一行失败则整批拒绝。
+
+```bash
+POST /api/budget-batches/submit
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "batchId": "BATCH-2024-001",
+  "rows": [
+    { "lineNumber": 1, "department": "技术部", "type": "追加", "amount": "50000", "reason": "Q2 设备采购" },
+    { "lineNumber": 2, "department": "市场部", "type": "调减", "amount": "10000", "reason": "活动结余回收" }
+  ]
+}
+
+# 成功响应
+{
+  "success": true,
+  "message": "批次提交成功",
+  "batch": { "batch_id": "BATCH-2024-001", "status": "completed", ... },
+  "lines": [...],
+  "departments": [...]
+}
+
+# 失败响应（校验错误）
+HTTP 400
+{
+  "error": "预检不通过，存在校验错误，整批拒绝",
+  "batchId": "BATCH-2024-001",
+  "results": [...]
+}
+
+# 失败响应（重复批次号）
+HTTP 409
+{
+  "error": "批次 BATCH-2024-001 已存在且已处理完成，不能重复提交",
+  "batchId": "BATCH-2024-001",
+  "status": "completed"
+}
+
+# 失败响应（权限错误）
+HTTP 403
+{
+  "error": "需要以下角色之一: finance"
+}
+```
+
+**事务特性**：
+- 所有调整在一个数据库事务中处理
+- 任何一行校验失败，整批回滚，不改变任何数据
+- 同部门多行会累计计算，确保中间状态也不违反预算约束
+- 批次号唯一，重复提交直接拒绝
+
+#### 3. 查询批次列表
+
+```bash
+GET /api/budget-batches?status=completed
+Authorization: Bearer <token>
+
+# 查询参数
+# - status: 按状态过滤 (pending/prechecked/submitted/failed/completed)
+# - batchId: 按批次号模糊搜索
+
+# 响应
+{
+  "batches": [
+    {
+      "batch_id": "BATCH-2024-001",
+      "user_id": 5,
+      "user_name": "qianqi",
+      "status": "completed",
+      "total_rows": 2,
+      "success_rows": 2,
+      "failed_rows": 0,
+      "total_amount": 40000,
+      "created_at": "2024-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+#### 4. 查询批次详情
+
+```bash
+GET /api/budget-batches/:batchId
+Authorization: Bearer <token>
+
+# 响应
+{
+  "batch": { ... },
+  "lines": [
+    {
+      "id": 1,
+      "batch_id": "BATCH-2024-001",
+      "line_number": 1,
+      "department_id": 1,
+      "department_name": "技术部",
+      "adjustment_type": "increase",
+      "amount": 50000,
+      "reason": "Q2 设备采购",
+      "status": "submitted",
+      "budget_before": 100000,
+      "budget_after": 150000,
+      "adjustment_id": 10,
+      "operator_name": "qianqi"
+    }
+  ]
+}
+```
+
+#### 5. 导出批次 CSV
+
+```bash
+GET /api/budget-batches/:batchId/export
+Authorization: Bearer <token>
+
+# 返回 CSV 文件，包含以下列：
+# 批次号, 行号, 部门, 调整类型, 金额, 调整前预算, 调整后预算, 原因, 状态, 校验错误, 操作人, 创建时间
 ```
 
 ## 验证流程
@@ -486,3 +751,121 @@ curl -s http://localhost:3000/api/ledger/check \
 curl -s -OJ http://localhost:3000/api/ledger/export \
   -H "Authorization: Bearer $FIN_TOKEN"
 ```
+
+## 批量导入功能验证
+
+### 运行自动化测试脚本
+
+项目包含完整的自动化测试脚本，覆盖所有要求的场景：
+
+```bash
+node test-batch-import.js
+```
+
+测试脚本覆盖以下 12 个场景，共 42 个测试点：
+
+| 场景 | 说明 |
+|------|------|
+| 1. 权限拒绝测试 | 申请人/主管直接调用财务接口返回 JSON 权限错误 |
+| 2. 预检失败测试 | 7 种不同校验错误类型（部门不存在、无效类型、负金额、零金额、空原因、调减过度） |
+| 3. 预检失败后提交被拒绝 | 存在校验错误时提交被整批拒绝，数据不变 |
+| 4. 成功提交批量调整 | 同部门累计调整正确，多部门预算正确 |
+| 5. 重复批次幂等性 | 同一批次号重复提交被拒绝，数据不变 |
+| 6. 同部门累计调减冲突 | 多行间累计调减导致低于锁定时整批拒绝 |
+| 7. 一致性检查验证 | 批量调整后账本一致性检查仍通过 |
+| 8. CSV 导出包含批次信息 | 账本导出包含批次号、行号、批次信息列 |
+| 9. 批次 CSV 导出 | 批次结果可单独导出为 CSV |
+| 10. 服务重启后持久化 | 服务重启后批次状态、明细、预算数据保持一致 |
+| 11. 批量调整历史可查询 | 申请人可查看批量调整历史记录 |
+| 12. CSV 格式灵活性 | 支持中英文表头、多种类型格式（追加/increase/+ 等） |
+
+### 手动验证步骤
+
+#### 场景 1：预检失败
+
+**步骤：**
+1. 登录财务账号 (qianqi / 123456)
+2. 点击「批量调整」→「新建批次」
+3. 输入以下 CSV 内容：
+```
+部门,类型,金额,原因
+不存在的部门,追加,50000,测试
+技术部,无效类型,30000,有效行
+技术部,调减,-500,负数
+技术部,调减,0,零金额
+技术部,调减,1000,
+市场部,调减,999999,调减过度
+技术部,追加,10000,正常有效行
+```
+4. 点击「预检」
+5. 预期结果：
+   - 返回 7 行结果
+   - 第 1-6 行显示校验错误，第 7 行通过
+   - 部门预算未发生变化
+
+#### 场景 2：成功提交
+
+**步骤：**
+1. 预检通过后，输入批次号 `TEST-SUCCESS-001`
+2. 点击「确认提交」
+3. 预期结果：
+   - 提示「批次提交成功」
+   - 部门预算按预期调整
+   - 每条调整记录带有 batch_id 和行号
+   - 批次状态为 completed
+
+#### 场景 3：权限失败
+
+**步骤：**
+1. 登录申请人账号 (zhangsan / 123456)
+2. 直接调用 API（浏览器开发者工具或 curl）：
+```bash
+ZHANGSAN_TOKEN=$(curl -s -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"zhangsan","password":"123456"}' | jq -r .token)
+
+curl -s -X POST http://localhost:3000/api/budget-batches/precheck \
+  -H "Authorization: Bearer $ZHANGSAN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"rows":[{"department":"技术部","type":"追加","amount":"10000","reason":"测试"}]}'
+```
+3. 预期结果：返回 JSON `{"error":"需要以下角色之一: finance"}`，状态码 403
+
+#### 场景 4：冲突失败
+
+**步骤：**
+1. 登录申请人账号 (zhangsan)，提交金额 120000 的采购申请
+2. 登录主管账号 (wangwu)，审批通过该申请（锁定技术部预算 120000）
+3. 登录财务账号 (qianqi)，提交以下批量调整：
+```
+部门,类型,金额,原因
+技术部,调减,30000,第一笔调减
+技术部,调减,30000,第二笔导致低于锁定
+```
+4. 预期结果：
+   - 预检可能通过（单笔都不低于锁定）
+   - 提交时整批拒绝
+   - 错误信息：「第 2 行: 累计调减后预算 (110000.00) 低于已使用加锁定金额 (120000.00)」
+   - 技术部预算保持 170000 不变
+
+#### 场景 5：重复批次幂等
+
+**步骤：**
+1. 使用与场景 2 相同的批次号 `TEST-SUCCESS-001` 再次提交
+2. 预期结果：
+   - 返回错误：「批次 TEST-SUCCESS-001 已存在且已处理完成，不能重复提交」
+   - 部门预算未变化
+   - 调整记录数未增加
+
+#### 场景 6：导出和重启验证
+
+**步骤：**
+1. 在批次列表中找到成功的批次，点击「导出」
+2. 预期：下载 CSV 文件，包含批次号、行号等信息
+3. 停止服务（Ctrl+C），重新启动 `npm start`
+4. 登录财务账号，查看批次列表
+5. 预期：
+   - 批次状态和明细与重启前一致
+   - 部门预算与重启前一致
+   - 一致性检查通过
+   - 账本导出包含批量调整记录和批次信息

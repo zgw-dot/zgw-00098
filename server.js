@@ -8,6 +8,7 @@ const applicationRoutes = require('./routes/applications');
 const departmentRoutes = require('./routes/departments');
 const ledgerRoutes = require('./routes/ledger');
 const budgetAdjustmentRoutes = require('./routes/budget-adjustments');
+const budgetBatchRoutes = require('./routes/budget-batches');
 
 const app = express();
 
@@ -20,6 +21,7 @@ app.use('/api/applications', applicationRoutes);
 app.use('/api/departments', departmentRoutes);
 app.use('/api/ledger', ledgerRoutes);
 app.use('/api/budget-adjustments', budgetAdjustmentRoutes);
+app.use('/api/budget-batches', budgetBatchRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -61,6 +63,11 @@ app.listen(port, () => {
 ║     POST /api/budget-adjustments/:id/reverse - 财务冲正调整     ║
 ║     GET  /api/budget-adjustments          - 预算调整历史记录     ║
 ║     GET  /api/budget-adjustments/:id      - 调整记录详情       ║
+║     POST /api/budget-batches/precheck     - 批量调整预检         ║
+║     POST /api/budget-batches/submit     - 批量调整提交         ║
+║     GET  /api/budget-batches          - 批次列表             ║
+║     GET  /api/budget-batches/:id      - 批次详情             ║
+║     GET  /api/budget-batches/:id/export - 批次导出CSV     ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
   `);

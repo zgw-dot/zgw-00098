@@ -102,6 +102,8 @@ db.serialize(() => {
       reversed_at DATETIME,
       reversal_reason TEXT,
       reversal_of_id INTEGER,
+      batch_id TEXT,
+      batch_line INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (department_id) REFERENCES departments(id),
       FOREIGN KEY (user_id) REFERENCES users(id),
@@ -111,6 +113,51 @@ db.serialize(() => {
   `, (err) => {
     if (err) console.error('创建 budget_adjustments 表失败:', err);
     else console.log('✓ budget_adjustments 表创建成功');
+  });
+
+  db.run(`
+    CREATE TABLE budget_batches (
+      batch_id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'prechecked', 'submitted', 'failed', 'completed')),
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      success_rows INTEGER NOT NULL DEFAULT 0,
+      failed_rows INTEGER NOT NULL DEFAULT 0,
+      total_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
+      error_message TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `, (err) => {
+    if (err) console.error('创建 budget_batches 表失败:', err);
+    else console.log('✓ budget_batches 表创建成功');
+  });
+
+  db.run(`
+    CREATE TABLE budget_batch_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id TEXT NOT NULL,
+      line_number INTEGER NOT NULL,
+      department_id INTEGER,
+      department_name TEXT,
+      adjustment_type TEXT CHECK(adjustment_type IN ('increase', 'decrease')),
+      amount DECIMAL(15,2),
+      reason TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'valid', 'invalid', 'submitted', 'failed')),
+      validation_error TEXT,
+      budget_before DECIMAL(15,2),
+      budget_after DECIMAL(15,2),
+      adjustment_id INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (batch_id) REFERENCES budget_batches(batch_id),
+      FOREIGN KEY (department_id) REFERENCES departments(id),
+      FOREIGN KEY (adjustment_id) REFERENCES budget_adjustments(id)
+    )
+  `, (err) => {
+    if (err) console.error('创建 budget_batch_lines 表失败:', err);
+    else console.log('✓ budget_batch_lines 表创建成功');
   });
 
   const stmtUser = db.prepare('INSERT INTO users (username, password_hash, role, department) VALUES (?, ?, ?, ?)');

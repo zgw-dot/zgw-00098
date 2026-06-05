@@ -46,6 +46,7 @@
           <button class="tab-btn active" data-tab="applications">申请列表</button>
           <button class="tab-btn" data-tab="budget">部门预算</button>
           <button class="tab-btn" data-tab="budgetAdjustments" id="budgetAdjustmentsTab">预算调整</button>
+          <button class="tab-btn" data-tab="budgetBatches" id="budgetBatchesTab">批量调整</button>
           <button class="tab-btn" data-tab="consistency">一致性检查</button>
           <button class="tab-btn" data-tab="export" id="exportTab">导出账本</button>
         </nav>
@@ -83,6 +84,22 @@
             </div>
           </div>
           <div id="adjustmentsList" class="table-container"></div>
+        </div>
+
+        <div id="budgetBatchesTab" class="tab-content">
+          <div class="actions-bar">
+            <button id="newBatchBtn" class="btn btn-primary">+ 批量导入</button>
+            <div class="filters">
+              <select id="batchStatusFilter">
+                <option value="">全部状态</option>
+                <option value="completed">已完成</option>
+                <option value="failed">失败</option>
+                <option value="submitted">已提交</option>
+              </select>
+              <button id="refreshBatchBtn" class="btn">刷新</button>
+            </div>
+          </div>
+          <div id="batchList" class="table-container"></div>
         </div>
 
         <div id="consistencyTab" class="tab-content">
