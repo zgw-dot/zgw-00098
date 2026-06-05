@@ -37,12 +37,13 @@ const executeWithRetry = async (fn, maxRetries = 10, delay = 200) => {
       return await fn();
     } catch (err) {
       if (attempt === maxRetries - 1) throw err;
+      const errCode = err.code || '';
       const errMsg = err.message || '';
-      if (errMsg.includes('database is locked') || 
-          errMsg.includes('SQLITE_BUSY') ||
-          errMsg.includes('ECONNRESET') ||
-          errMsg.includes('connection') ||
-          errMsg.includes('Cannot read properties')) {
+      if (errCode === 'SQLITE_BUSY' || 
+          errCode === 'SQLITE_ERROR' ||
+          errMsg.includes('database is locked') ||
+          errMsg.includes('cannot start a transaction within a transaction') ||
+          errMsg.includes('SQLITE_BUSY')) {
         await new Promise(resolve => setTimeout(resolve, delay * (attempt + 1)));
         continue;
       }
@@ -56,19 +57,27 @@ const executeWithRetry = async (fn, maxRetries = 10, delay = 200) => {
 
 const runTransaction = async (operations) => {
   return new Promise((resolve, reject) => {
-    db.serialize(async () => {
-      db.run('BEGIN IMMEDIATE TRANSACTION');
+    db.run('BEGIN IMMEDIATE TRANSACTION', async (beginErr) => {
+      if (beginErr) {
+        return reject(beginErr);
+      }
       try {
         const result = await operations();
-        db.run('COMMIT', (err) => {
-          if (err) {
-            db.run('ROLLBACK', () => reject(err));
+        db.run('COMMIT', (commitErr) => {
+          if (commitErr) {
+            db.run('ROLLBACK', () => reject(commitErr));
           } else {
             resolve(result);
           }
         });
-      } catch (err) {
-        db.run('ROLLBACK', () => reject(err));
+      } catch (opErr) {
+        db.run('ROLLBACK', (rollbackErr) => {
+          if (rollbackErr) {
+            reject(rollbackErr);
+          } else {
+            reject(opErr);
+          }
+        });
       }
     });
   });
