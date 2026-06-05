@@ -96,6 +96,11 @@
 - **withdrawn** (已撤回) → 申请人撤回后（终态）
 - **confirmed** (财务确认) → 财务确认后（终态）
 
+撤回规则:
+- 仅 **pending** 状态可由申请人撤回
+- **approved**、**withdrawn**、**confirmed**、**rejected** 状态均不可撤回
+- 撤回后预算锁定自动释放，状态变更为 withdrawn（终态）
+
 ## 快速开始
 
 ### 1. 初始化数据库
@@ -160,7 +165,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/applications
 | 查看申请列表 | ✅（仅自己的） | ✅（仅本部门的） | ✅（全部） | |
 | 主管审批 | ❌ | ✅ | ❌ | 只能审批本部门、非自己提交的 |
 | 驳回申请 | ❌ | ✅ | ❌ | 只能驳回本部门、非自己提交的 |
-| 撤回申请 | ✅（仅自己的） | ❌ | ❌ | 只能撤回 pending/approved 状态的 |
+| 撤回申请 | ✅（仅自己的） | ❌ | ❌ | 只能撤回 pending 状态的，approved/withdrawn/confirmed/rejected 均不可撤回 |
 | 财务确认 | ❌ | ❌ | ✅ | 只能确认 approved 状态的 |
 | 导出CSV账本 | ❌ | ❌ | ✅ | |
 | 一致性检查 | ✅ | ✅ | ✅ | 所有登录用户 |
@@ -224,9 +229,18 @@ Content-Type: application/json
   "remark": "预算不足，请调整"
 }
 
-# 申请人撤回
+# 申请人撤回（仅 pending 状态可撤回）
 POST /api/applications/:id/withdraw
 Authorization: Bearer <token>
+
+# 错误响应（状态不允许时）
+HTTP 400
+{
+  "error": "已审批通过的申请不能撤回，请联系财务处理" |
+           "申请已撤回，不能重复撤回" |
+           "已财务确认的申请不能撤回" |
+           "已驳回的申请不能撤回"
+}
 
 # 财务确认
 POST /api/applications/:id/confirm
@@ -325,11 +339,18 @@ Authorization: Bearer <token>
 - 预期：后端返回 400 错误「申请已撤回，不能重复撤回」
 - 验证：部门预算余额未发生变化
 
-#### 5. 跨部门审批校验
+#### 5. approved 状态撤回校验
+- 登录 zhangsan，提交一笔申请（状态 pending）
+- 登录 wangwu（主管），审批通过该申请（状态 approved）
+- 登录 zhangsan，尝试撤回该 approved 状态的申请
+- 预期：后端返回 400 错误「已审批通过的申请不能撤回，请联系财务处理」
+- 验证：状态仍为 approved，预算仍锁定，时间线未新增记录
+
+#### 6. 跨部门审批校验
 - 登录 wangwu（技术部主管），尝试审批市场部的申请
 - 预期：后端返回 403 错误「只能审批本部门的申请」
 
-#### 6. 越权操作校验（直接调 API）
+#### 7. 越权操作校验（直接调 API）
 ```bash
 # 使用 zhangsan 的 token 尝试调用审批接口
 curl -X POST http://localhost:3000/api/applications/1/approve \
