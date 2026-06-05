@@ -297,6 +297,10 @@ router.post('/:id/withdraw', authenticate, requireApplicant, async (req, res) =>
       return res.status(403).json({ error: '只能撤回自己提交的申请' });
     }
 
+    if (app.status === 'approved') {
+      return res.status(400).json({ error: '已审批通过的申请不能撤回，请联系财务处理' });
+    }
+
     if (app.status === 'withdrawn') {
       return res.status(400).json({ error: '申请已撤回，不能重复撤回' });
     }
@@ -305,7 +309,11 @@ router.post('/:id/withdraw', authenticate, requireApplicant, async (req, res) =>
       return res.status(400).json({ error: '已财务确认的申请不能撤回' });
     }
 
-    if (app.status !== 'pending' && app.status !== 'approved') {
+    if (app.status === 'rejected') {
+      return res.status(400).json({ error: '已驳回的申请不能撤回' });
+    }
+
+    if (app.status !== 'pending') {
       return res.status(400).json({ error: `当前状态 ${app.status} 不支持撤回` });
     }
 

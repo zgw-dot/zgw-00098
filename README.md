@@ -398,3 +398,70 @@ VALUES ('newuser', '<bcrypt_hash>', 'applicant', '技术部');
 ### Q: 数据库文件在哪里？
 - SQLite 数据库：`data/budget.db`
 - 导出的 CSV：`exports/budget-ledger-*.csv`
+
+## 常用验证命令
+
+### 验证撤回状态机
+
+```bash
+# 1. 登录获取 token
+TOKEN=$(curl -s -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"zhangsan","password":"123456"}' | jq -r .token)
+
+# 2. 提交一笔申请 (pending)
+APP_ID=$(curl -s -X POST http://localhost:3000/api/applications \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"amount":5000,"supplier":"测试","purpose":"测试"}' | jq -r .application.id)
+
+# 3. pending 状态撤回 (应该成功，释放预算)
+curl -s -X POST http://localhost:3000/api/applications/$APP_ID/withdraw \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json"
+# 预期: {"application":{...,"status":"withdrawn"}}
+
+# 4. 重复撤回 (应该失败，不改变余额)
+curl -s -X POST http://localhost:3000/api/applications/$APP_ID/withdraw \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json"
+# 预期: {"error":"申请已撤回，不能重复撤回"} (HTTP 400)
+
+# 5. 新建申请并审批，测试 approved 状态撤回
+APP_ID2=$(curl -s -X POST http://localhost:3000/api/applications \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"amount":8000,"supplier":"测试2","purpose":"测试2"}' | jq -r .application.id)
+
+SUP_TOKEN=$(curl -s -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"wangwu","password":"123456"}' | jq -r .token)
+
+curl -s -X POST http://localhost:3000/api/applications/$APP_ID2/approve \
+  -H "Authorization: Bearer $SUP_TOKEN" \
+  -H "Content-Type: application/json"
+
+# 6. approved 状态撤回 (应该失败)
+curl -s -X POST http://localhost:3000/api/applications/$APP_ID2/withdraw \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json"
+# 预期: {"error":"已审批通过的申请不能撤回，请联系财务处理"} (HTTP 400)
+```
+
+### 一致性检查
+
+```bash
+FIN_TOKEN=$(curl -s -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"qianqi","password":"123456"}' | jq -r .token)
+
+curl -s http://localhost:3000/api/ledger/check \
+  -H "Authorization: Bearer $FIN_TOKEN" | jq .
+```
+
+### 导出 CSV 账本
+
+```bash
+curl -s -OJ http://localhost:3000/api/ledger/export \
+  -H "Authorization: Bearer $FIN_TOKEN"
+```

@@ -144,8 +144,7 @@ function renderApplications(applications) {
 
   const canSeeActions = (app) => {
     if (currentUser.role === 'applicant') {
-      return app.applicant_id === currentUser.id && 
-             (app.status === 'pending' || app.status === 'approved');
+      return app.applicant_id === currentUser.id && app.status === 'pending';
     }
     if (currentUser.role === 'supervisor') {
       return app.department_name === currentUser.department && 
@@ -255,6 +254,13 @@ async function viewApplication(id) {
         <span class="detail-label">状态</span>
         <span class="detail-value"><span class="status-badge ${status.class}">${status.text}</span></span>
       </div>
+      ${currentUser.role === 'applicant' && app.applicant_id === currentUser.id && app.status === 'approved' ? `
+      <div class="detail-row">
+        <span class="detail-label"></span>
+        <span class="detail-value" style="color: #d69e2e; font-size: 0.9rem;">
+          ⚠ 已审批通过的申请不能撤回，如需修改请联系财务处理
+        </span>
+      </div>` : ''}
       ${app.supervisor_name ? `
       <div class="detail-row">
         <span class="detail-label">审批主管</span>
