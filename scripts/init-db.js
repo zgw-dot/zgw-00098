@@ -119,12 +119,13 @@ db.serialize(() => {
     CREATE TABLE budget_batches (
       batch_id TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'prechecked', 'submitted', 'failed', 'completed')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'prechecked', 'submitted', 'failed', 'completed', 'cancelled')),
       total_rows INTEGER NOT NULL DEFAULT 0,
       success_rows INTEGER NOT NULL DEFAULT 0,
       failed_rows INTEGER NOT NULL DEFAULT 0,
       total_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
       error_message TEXT,
+      content_hash TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id)
@@ -132,6 +133,22 @@ db.serialize(() => {
   `, (err) => {
     if (err) console.error('创建 budget_batches 表失败:', err);
     else console.log('✓ budget_batches 表创建成功');
+  });
+
+  db.run(`
+    CREATE TABLE budget_batch_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('precheck', 'submit', 'cancel', 'export')),
+      remark TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (batch_id) REFERENCES budget_batches(batch_id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `, (err) => {
+    if (err) console.error('创建 budget_batch_operations 表失败:', err);
+    else console.log('✓ budget_batch_operations 表创建成功');
   });
 
   db.run(`
@@ -144,8 +161,10 @@ db.serialize(() => {
       adjustment_type TEXT CHECK(adjustment_type IN ('increase', 'decrease')),
       amount DECIMAL(15,2),
       reason TEXT,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'valid', 'invalid', 'submitted', 'failed')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'valid', 'invalid', 'submitted', 'failed', 'cancelled')),
       validation_error TEXT,
+      current_budget DECIMAL(15,2),
+      expected_budget_after DECIMAL(15,2),
       budget_before DECIMAL(15,2),
       budget_after DECIMAL(15,2),
       adjustment_id INTEGER,

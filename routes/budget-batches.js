@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const db = require('../config/database');
 const { authenticate, requireFinance } = require('../middleware/auth');
 const createCsvWriter = require('csv-writer').createObjectCsvWriter;
@@ -83,6 +84,20 @@ const runTransaction = async (operations) => {
       }
     });
   });
+};
+
+const calculateContentHash = (rows) => {
+  const content = rows.map(r => 
+    `${r.lineNumber}|${r.department}|${r.type}|${r.amount}|${r.reason}`
+  ).join('||');
+  return crypto.createHash('sha256').update(content).digest('hex');
+};
+
+const logOperation = async (batchId, userId, operation, remark = null) => {
+  await runQuery(
+    'INSERT INTO budget_batch_operations (batch_id, user_id, operation, remark) VALUES (?, ?, ?, ?)',
+    [batchId, userId, operation, remark]
+  );
 };
 
 const parseCSV = (csvText) => {
@@ -197,12 +212,102 @@ const validateRow = async (row, departmentsMap) => {
   return result;
 };
 
+const savePrecheckResult = async (batchId, userId, validationResults, allValid, totalAmount, contentHash) => {
+  await executeWithRetry(async () => {
+    return await runTransaction(async () => {
+      const existingBatch = await queryGet(
+        'SELECT * FROM budget_batches WHERE batch_id = ?',
+        [batchId]
+      );
+
+      if (existingBatch) {
+        if (existingBatch.status === 'completed' || existingBatch.status === 'submitted') {
+          const error = new Error(`批次 ${batchId} 已处理完成，不能重新预检`);
+          error.status = 409;
+          error.code = 'BATCH_ALREADY_PROCESSED';
+          throw error;
+        }
+        if (existingBatch.status === 'cancelled') {
+          const error = new Error(`批次 ${batchId} 已取消，不能重新预检`);
+          error.status = 409;
+          error.code = 'BATCH_CANCELLED';
+          throw error;
+        }
+        await runQuery('DELETE FROM budget_batch_lines WHERE batch_id = ?', [batchId]);
+        await runQuery(
+          `UPDATE budget_batches 
+           SET status = ?, total_rows = ?, success_rows = ?, failed_rows = ?, 
+               total_amount = ?, error_message = ?, content_hash = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE batch_id = ?`,
+          [
+            allValid ? 'prechecked' : 'failed',
+            validationResults.length,
+            validationResults.filter(r => r.valid).length,
+            validationResults.filter(r => !r.valid).length,
+            parseFloat(totalAmount.toFixed(2)),
+            allValid ? null : '预检不通过，存在校验错误',
+            contentHash,
+            batchId
+          ]
+        );
+      } else {
+        await runQuery(
+          `INSERT INTO budget_batches 
+           (batch_id, user_id, status, total_rows, success_rows, failed_rows, total_amount, error_message, content_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            batchId,
+            userId,
+            allValid ? 'prechecked' : 'failed',
+            validationResults.length,
+            validationResults.filter(r => r.valid).length,
+            validationResults.filter(r => !r.valid).length,
+            parseFloat(totalAmount.toFixed(2)),
+            allValid ? null : '预检不通过，存在校验错误',
+            contentHash
+          ]
+        );
+      }
+
+      for (const result of validationResults) {
+        await runQuery(
+          `INSERT INTO budget_batch_lines
+           (batch_id, line_number, department_id, department_name, adjustment_type, amount, reason, status, validation_error, current_budget, expected_budget_after)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            batchId,
+            result.lineNumber,
+            result.departmentId || null,
+            result.department,
+            result.adjustmentType || null,
+            result.amountNum || null,
+            result.reason,
+            result.valid ? 'valid' : 'invalid',
+            result.error,
+            result.currentBudget,
+            result.expectedBudgetAfter
+          ]
+        );
+      }
+
+      await logOperation(batchId, userId, 'precheck', 
+        allValid ? `预检通过，共 ${validationResults.length} 行` : `预检失败，${validationResults.filter(r => !r.valid).length} 行错误`);
+
+      return true;
+    });
+  });
+};
+
 router.post('/precheck', authenticate, requireFinance, async (req, res) => {
   try {
     const { csvText, rows, batchId } = req.body;
 
+    if (!batchId) {
+      return res.status(400).json({ error: '缺少批次号 batchId', code: 'MISSING_BATCH_ID' });
+    }
+
     if (!csvText && !rows) {
-      return res.status(400).json({ error: '请提供 CSV 内容或数据行' });
+      return res.status(400).json({ error: '请提供 CSV 内容或数据行', code: 'MISSING_DATA' });
     }
 
     let parsedRows;
@@ -219,7 +324,7 @@ router.post('/precheck', authenticate, requireFinance, async (req, res) => {
     }
 
     if (parsedRows.length === 0) {
-      return res.status(400).json({ error: '没有有效的数据行' });
+      return res.status(400).json({ error: '没有有效的数据行', code: 'NO_DATA' });
     }
 
     const departments = await queryAll('SELECT * FROM departments');
@@ -243,13 +348,19 @@ router.post('/precheck', authenticate, requireFinance, async (req, res) => {
       }
     }
 
+    const contentHash = calculateContentHash(parsedRows);
+
+    await savePrecheckResult(batchId, req.user.id, validationResults, allValid, totalAmount, contentHash);
+
     const response = {
-      batchId: batchId || `BATCH-${Date.now()}`,
+      batchId,
+      status: allValid ? 'prechecked' : 'failed',
       totalRows: parsedRows.length,
       validRows: validationResults.filter(r => r.valid).length,
       invalidRows: validationResults.filter(r => !r.valid).length,
       allValid,
       totalAmount: parseFloat(totalAmount.toFixed(2)),
+      contentHash,
       results: validationResults.map(r => ({
         lineNumber: r.lineNumber,
         department: r.department,
@@ -270,22 +381,85 @@ router.post('/precheck', authenticate, requireFinance, async (req, res) => {
 
     res.json(response);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    const status = err.status || 400;
+    res.status(status).json({ 
+      error: err.message, 
+      code: err.code || 'PRECHECK_FAILED',
+      batchId: req.body.batchId
+    });
   }
 });
 
 router.post('/submit', authenticate, requireFinance, async (req, res) => {
-  const { batchId, rows } = req.body;
+  const { batchId, rows, contentHash } = req.body;
 
   if (!batchId) {
-    return res.status(400).json({ error: '缺少批次号 batchId' });
+    return res.status(400).json({ error: '缺少批次号 batchId', code: 'MISSING_BATCH_ID' });
   }
 
   if (!rows || rows.length === 0) {
-    return res.status(400).json({ error: '没有数据行' });
+    return res.status(400).json({ error: '没有数据行', code: 'MISSING_DATA' });
   }
 
   try {
+    const existingBatch = await queryGet(
+      'SELECT * FROM budget_batches WHERE batch_id = ?',
+      [batchId]
+    );
+
+    if (!existingBatch) {
+      return res.status(404).json({ 
+        error: `批次 ${batchId} 不存在，请先进行预检`, 
+        code: 'BATCH_NOT_FOUND' 
+      });
+    }
+
+    if (existingBatch.status === 'cancelled') {
+      return res.status(409).json({ 
+        error: `批次 ${batchId} 已取消，不能提交`, 
+        code: 'BATCH_CANCELLED',
+        status: existingBatch.status 
+      });
+    }
+
+    if (existingBatch.status === 'completed' || existingBatch.status === 'submitted') {
+      return res.status(409).json({ 
+        error: `批次 ${batchId} 已处理完成，不能重复提交`, 
+        code: 'BATCH_ALREADY_PROCESSED',
+        status: existingBatch.status 
+      });
+    }
+
+    if (existingBatch.status !== 'prechecked') {
+      return res.status(400).json({ 
+        error: `批次 ${batchId} 状态为 ${existingBatch.status}，必须先预检通过才能提交`, 
+        code: 'BATCH_NOT_PRECHECKED',
+        status: existingBatch.status 
+      });
+    }
+
+    if (existingBatch.content_hash && contentHash && existingBatch.content_hash !== contentHash) {
+      return res.status(400).json({ 
+        error: '预检内容已被修改，请重新进行预检', 
+        code: 'CONTENT_MODIFIED' 
+      });
+    }
+
+    const submittedHash = calculateContentHash(rows);
+    if (existingBatch.content_hash && existingBatch.content_hash !== submittedHash) {
+      return res.status(400).json({ 
+        error: '提交内容与预检内容不一致，请重新预检', 
+        code: 'CONTENT_MISMATCH' 
+      });
+    }
+
+    if (existingBatch.user_id !== req.user.id) {
+      return res.status(403).json({ 
+        error: '只能提交自己创建的批次', 
+        code: 'PERMISSION_DENIED' 
+      });
+    }
+
     const departments = await queryAll('SELECT * FROM departments');
     const departmentsMap = new Map();
     for (const dept of departments) {
@@ -311,62 +485,15 @@ router.post('/submit', authenticate, requireFinance, async (req, res) => {
     }
 
     if (!allValid) {
-      const failedBatch = await executeWithRetry(async () => {
-        return await runTransaction(async () => {
-          const existingBatchLocked = await queryGet(
-            'SELECT * FROM budget_batches WHERE batch_id = ?',
-            [batchId]
-          );
-
-          if (existingBatchLocked) {
-            const error = new Error(`批次 ${batchId} 已存在`);
-            error.status = 409;
-            error.batchStatus = existingBatchLocked.status;
-            throw error;
-          }
-
-          await runQuery(
-            `INSERT INTO budget_batches 
-             (batch_id, user_id, status, total_rows, success_rows, failed_rows, total_amount, error_message)
-             VALUES (?, ?, 'failed', ?, 0, ?, 0, ?)`,
-            [
-              batchId,
-              req.user.id,
-              rows.length,
-              validationResults.filter(r => !r.valid).length,
-              '预检不通过，存在校验错误'
-            ]
-          );
-
-          for (const result of validationResults) {
-            await runQuery(
-              `INSERT INTO budget_batch_lines
-               (batch_id, line_number, department_id, department_name, adjustment_type, amount, reason, status, validation_error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'invalid', ?)`,
-              [
-                batchId,
-                result.lineNumber,
-                result.departmentId || null,
-                result.department,
-                result.adjustmentType || null,
-                result.amountNum || null,
-                result.reason,
-                result.error
-              ]
-            );
-          }
-
-          await runQuery(
-            'UPDATE budget_batches SET updated_at = CURRENT_TIMESTAMP WHERE batch_id = ?',
-            [batchId]
-          );
-
-          return { batchId, validationResults };
-        });
-      });
-
+      await runQuery(
+        "UPDATE budget_batches SET status = 'failed', error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
+        ['提交时校验不通过，存在校验错误', batchId]
+      );
+      await logOperation(batchId, req.user.id, 'submit', '提交失败：校验不通过');
+      
       return res.status(400).json({
-        error: '预检不通过，存在校验错误，整批拒绝',
+        error: '提交失败，预检通过后数据发生变化，请重新预检',
+        code: 'VALIDATION_FAILED',
         batchId,
         totalRows: rows.length,
         validRows: validationResults.filter(r => r.valid).length,
@@ -385,17 +512,22 @@ router.post('/submit', authenticate, requireFinance, async (req, res) => {
 
     const result = await executeWithRetry(async () => {
       return await runTransaction(async () => {
-        const existingBatchLocked = await queryGet(
+        const batchLocked = await queryGet(
           'SELECT * FROM budget_batches WHERE batch_id = ?',
           [batchId]
         );
 
-        if (existingBatchLocked) {
-          const error = new Error(`批次 ${batchId} 已存在，不能重复提交`);
+        if (batchLocked.status !== 'prechecked') {
+          const error = new Error(`批次 ${batchId} 状态已变更，请刷新后重试`);
           error.status = 409;
-          error.batchStatus = existingBatchLocked.status;
+          error.code = 'BATCH_STATUS_CHANGED';
           throw error;
         }
+
+        await runQuery(
+          "UPDATE budget_batches SET status = 'submitted', updated_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
+          [batchId]
+        );
 
         const deptBudgetChanges = new Map();
 
@@ -429,30 +561,19 @@ router.post('/submit', authenticate, requireFinance, async (req, res) => {
                   `第 ${change.lineNumber} 行: 累计调减后预算 (${runningTotal.toFixed(2)}) 低于已使用加锁定金额 (${minAllowed.toFixed(2)})`
                 );
                 error.status = 400;
+                error.code = 'BUDGET_VIOLATION';
                 throw error;
               }
             }
             if (runningTotal < 0) {
               const error = new Error(`第 ${change.lineNumber} 行: 累计调整后预算不能为负数`);
               error.status = 400;
+              error.code = 'NEGATIVE_BUDGET';
               throw error;
             }
             change.finalBudgetAfter = runningTotal;
           }
         }
-
-        await runQuery(
-          `INSERT INTO budget_batches 
-           (batch_id, user_id, status, total_rows, success_rows, failed_rows, total_amount)
-           VALUES (?, ?, 'submitted', ?, ?, 0, ?)`,
-          [
-            batchId,
-            req.user.id,
-            rows.length,
-            rows.length,
-            parseFloat(validationResults.reduce((sum, r) => sum + r.amountNum, 0).toFixed(2))
-          ]
-        );
 
         for (const result of validationResults) {
           const deptData = deptBudgetChanges.get(result.departmentId);
@@ -496,20 +617,15 @@ router.post('/submit', authenticate, requireFinance, async (req, res) => {
           );
 
           await runQuery(
-            `INSERT INTO budget_batch_lines
-             (batch_id, line_number, department_id, department_name, adjustment_type, amount, reason, status, budget_before, budget_after, adjustment_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?)`,
+            `UPDATE budget_batch_lines
+             SET status = 'submitted', budget_before = ?, budget_after = ?, adjustment_id = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE batch_id = ? AND line_number = ?`,
             [
-              batchId,
-              result.lineNumber,
-              result.departmentId,
-              result.department,
-              result.adjustmentType,
-              result.amountNum,
-              result.reason.trim(),
               budgetBefore,
               budgetAfter,
-              adjResult.lastID
+              adjResult.lastID,
+              batchId,
+              result.lineNumber
             ]
           );
         }
@@ -518,6 +634,8 @@ router.post('/submit', authenticate, requireFinance, async (req, res) => {
           "UPDATE budget_batches SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
           [batchId]
         );
+
+        await logOperation(batchId, req.user.id, 'submit', `提交成功，共 ${validationResults.length} 行`);
 
         return { validationResults, deptBudgetChanges };
       });
@@ -542,6 +660,15 @@ router.post('/submit', authenticate, requireFinance, async (req, res) => {
       [batchId]
     );
 
+    const operations = await queryAll(
+      `SELECT bo.*, u.username as user_name
+       FROM budget_batch_operations bo
+       LEFT JOIN users u ON bo.user_id = u.id
+       WHERE bo.batch_id = ?
+       ORDER BY bo.created_at`,
+      [batchId]
+    );
+
     const updatedDepartments = await queryAll(`
       SELECT d.*,
              (d.budget_total - d.budget_used - d.budget_locked) as budget_available
@@ -554,63 +681,110 @@ router.post('/submit', authenticate, requireFinance, async (req, res) => {
       message: '批次提交成功',
       batch,
       lines: batchLines,
+      operations,
       departments: updatedDepartments
     });
   } catch (err) {
     const status = err.status || 500;
+    const code = err.code || 'SUBMIT_FAILED';
 
-    if (status === 409) {
-      if (err.batchStatus === 'completed' || err.batchStatus === 'submitted') {
-        return res.status(409).json({
-          error: `批次 ${batchId} 已存在且已处理完成，不能重复提交`,
-          batchId,
-          status: err.batchStatus
-        });
-      }
-      if (err.batchStatus === 'failed') {
-        return res.status(409).json({
-          error: `批次 ${batchId} 已存在但处理失败，请使用新的批次号`,
-          batchId,
-          status: err.batchStatus
-        });
-      }
-      return res.status(409).json({
-        error: err.message || `批次 ${batchId} 已存在，不能重复提交`,
-        batchId
-      });
-    }
-
-    if (status !== 409 && status >= 400) {
+    if (status !== 409 && status >= 400 && status < 500) {
       try {
-        const existingBatch = await queryGet(
-          'SELECT * FROM budget_batches WHERE batch_id = ?',
-          [batchId]
+        await runQuery(
+          "UPDATE budget_batches SET status = 'failed', error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
+          [err.message, batchId]
         );
-        if (existingBatch) {
-          await runQuery(
-            "UPDATE budget_batches SET status = 'failed', error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
-            [err.message, batchId]
-          );
-        } else {
-          await runQuery(
-            `INSERT INTO budget_batches 
-             (batch_id, user_id, status, total_rows, success_rows, failed_rows, total_amount, error_message)
-             VALUES (?, ?, 'failed', ?, 0, ?, 0, ?)`,
-            [
-              batchId,
-              req.user.id,
-              rows.length,
-              rows.length,
-              err.message
-            ]
-          );
-        }
       } catch (e) {
         console.error('更新批次状态失败:', e);
       }
     }
 
-    res.status(status).json({ error: err.message || '批次提交失败' });
+    res.status(status).json({ 
+      error: err.message || '批次提交失败', 
+      code,
+      batchId 
+    });
+  }
+});
+
+router.post('/:batchId/cancel', authenticate, requireFinance, async (req, res) => {
+  const { batchId } = req.params;
+  const { reason } = req.body;
+
+  try {
+    const existingBatch = await queryGet(
+      'SELECT * FROM budget_batches WHERE batch_id = ?',
+      [batchId]
+    );
+
+    if (!existingBatch) {
+      return res.status(404).json({ 
+        error: `批次 ${batchId} 不存在`, 
+        code: 'BATCH_NOT_FOUND' 
+      });
+    }
+
+    if (existingBatch.user_id !== req.user.id) {
+      return res.status(403).json({ 
+        error: '只能取消自己创建的批次', 
+        code: 'PERMISSION_DENIED' 
+      });
+    }
+
+    if (existingBatch.status === 'cancelled') {
+      return res.status(409).json({ 
+        error: `批次 ${batchId} 已取消`, 
+        code: 'ALREADY_CANCELLED',
+        status: existingBatch.status 
+      });
+    }
+
+    if (existingBatch.status === 'completed' || existingBatch.status === 'submitted') {
+      return res.status(409).json({ 
+        error: `批次 ${batchId} 已处理完成，不能取消`, 
+        code: 'BATCH_ALREADY_PROCESSED',
+        status: existingBatch.status 
+      });
+    }
+
+    await executeWithRetry(async () => {
+      return await runTransaction(async () => {
+        await runQuery(
+          "UPDATE budget_batches SET status = 'cancelled', error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
+          [reason || '用户取消', batchId]
+        );
+
+        await runQuery(
+          "UPDATE budget_batch_lines SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
+          [batchId]
+        );
+
+        await logOperation(batchId, req.user.id, 'cancel', reason || '用户取消');
+
+        return true;
+      });
+    });
+
+    const batch = await queryGet(
+      `SELECT bb.*, u.username as user_name
+       FROM budget_batches bb
+       LEFT JOIN users u ON bb.user_id = u.id
+       WHERE bb.batch_id = ?`,
+      [batchId]
+    );
+
+    res.json({
+      success: true,
+      message: '批次已取消',
+      batch
+    });
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ 
+      error: err.message || '取消失败', 
+      code: err.code || 'CANCEL_FAILED',
+      batchId 
+    });
   }
 });
 
@@ -661,7 +835,7 @@ router.get('/:batchId', authenticate, async (req, res) => {
     );
 
     if (!batch) {
-      return res.status(404).json({ error: '批次不存在' });
+      return res.status(404).json({ error: '批次不存在', code: 'BATCH_NOT_FOUND' });
     }
 
     const lines = await queryAll(
@@ -682,7 +856,35 @@ router.get('/:batchId', authenticate, async (req, res) => {
       [batchId]
     );
 
-    res.json({ batch, lines });
+    const operations = await queryAll(
+      `SELECT bo.*, u.username as user_name
+       FROM budget_batch_operations bo
+       LEFT JOIN users u ON bo.user_id = u.id
+       WHERE bo.batch_id = ?
+       ORDER BY bo.created_at`,
+      [batchId]
+    );
+
+    res.json({ batch, lines, operations });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/:batchId/operations', authenticate, async (req, res) => {
+  try {
+    const { batchId } = req.params;
+
+    const operations = await queryAll(
+      `SELECT bo.*, u.username as user_name
+       FROM budget_batch_operations bo
+       LEFT JOIN users u ON bo.user_id = u.id
+       WHERE bo.batch_id = ?
+       ORDER BY bo.created_at`,
+      [batchId]
+    );
+
+    res.json({ operations });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -691,6 +893,7 @@ router.get('/:batchId', authenticate, async (req, res) => {
 router.get('/:batchId/export', authenticate, requireFinance, async (req, res) => {
   try {
     const { batchId } = req.params;
+    const { type = 'all' } = req.query;
 
     const batch = await queryGet(
       `SELECT bb.*, u.username as user_name
@@ -701,7 +904,7 @@ router.get('/:batchId/export', authenticate, requireFinance, async (req, res) =>
     );
 
     if (!batch) {
-      return res.status(404).json({ error: '批次不存在' });
+      return res.status(404).json({ error: '批次不存在', code: 'BATCH_NOT_FOUND' });
     }
 
     const lines = await queryAll(
@@ -728,6 +931,7 @@ router.get('/:batchId/export', authenticate, requireFinance, async (req, res) =>
       'submitted': '已提交',
       'completed': '已完成',
       'failed': '失败',
+      'cancelled': '已取消',
       'valid': '有效',
       'invalid': '无效'
     };
@@ -737,42 +941,80 @@ router.get('/:batchId/export', authenticate, requireFinance, async (req, res) =>
       'decrease': '调减预算'
     };
 
+    let exportLines = lines;
+    let filenameSuffix = 'all';
+    let headerExtra = [];
+
+    if (type === 'precheck') {
+      filenameSuffix = 'precheck';
+      headerExtra = [
+        { id: 'current_budget', title: '当前预算' },
+        { id: 'expected_budget_after', title: '预计调整后' }
+      ];
+    } else if (type === 'ledger') {
+      filenameSuffix = 'ledger';
+      exportLines = lines.filter(l => l.status === 'submitted');
+      headerExtra = [
+        { id: 'budget_before', title: '调整前预算' },
+        { id: 'budget_after', title: '调整后预算' },
+        { id: 'adjustment_id', title: '调整记录ID' }
+      ];
+    } else if (type === 'failed') {
+      filenameSuffix = 'failed';
+      exportLines = lines.filter(l => l.status === 'invalid' || l.status === 'failed');
+      headerExtra = [
+        { id: 'current_budget', title: '当前预算' },
+        { id: 'expected_budget_after', title: '预计调整后' },
+        { id: 'validation_error', title: '错误信息' }
+      ];
+    } else {
+      headerExtra = [
+        { id: 'current_budget', title: '当前预算' },
+        { id: 'expected_budget_after', title: '预计调整后' },
+        { id: 'budget_before', title: '调整前预算' },
+        { id: 'budget_after', title: '调整后预算' },
+        { id: 'status', title: '状态' },
+        { id: 'validation_error', title: '错误信息' },
+        { id: 'adjustment_id', title: '调整记录ID' }
+      ];
+    }
+
     const exportDir = path.join(__dirname, '..', 'exports');
     if (!fs.existsSync(exportDir)) {
       fs.mkdirSync(exportDir, { recursive: true });
     }
 
-    const filename = `batch-${batchId}-${Date.now()}.csv`;
+    const filename = `batch-${batchId}-${filenameSuffix}-${Date.now()}.csv`;
     const filepath = path.join(exportDir, filename);
 
     const csvWriter = createCsvWriter({
       path: filepath,
       header: [
         { id: 'batch_id', title: '批次号' },
+        { id: 'batch_status', title: '批次状态' },
         { id: 'line_number', title: '行号' },
         { id: 'department', title: '部门' },
         { id: 'adjustment_type', title: '调整类型' },
         { id: 'amount', title: '金额' },
-        { id: 'budget_before', title: '调整前预算' },
-        { id: 'budget_after', title: '调整后预算' },
         { id: 'reason', title: '原因' },
-        { id: 'status', title: '状态' },
-        { id: 'validation_error', title: '错误信息' },
-        { id: 'adjustment_id', title: '调整记录ID' },
+        ...headerExtra,
         { id: 'operator', title: '操作人' },
         { id: 'created_at', title: '创建时间' }
       ]
     });
 
-    const records = lines.map(line => ({
+    const records = exportLines.map(line => ({
       batch_id: batchId,
+      batch_status: statusMap[batch.status] || batch.status,
       line_number: line.line_number,
       department: line.department_name || line.department,
       adjustment_type: typeMap[line.adjustment_type] || line.adjustment_type,
       amount: parseFloat(line.amount).toFixed(2),
-      budget_before: line.budget_before ? parseFloat(line.budget_before).toFixed(2) : '',
-      budget_after: line.budget_after ? parseFloat(line.budget_after).toFixed(2) : '',
       reason: line.reason,
+      current_budget: line.current_budget !== null && line.current_budget !== undefined ? parseFloat(line.current_budget).toFixed(2) : '',
+      expected_budget_after: line.expected_budget_after !== null && line.expected_budget_after !== undefined ? parseFloat(line.expected_budget_after).toFixed(2) : '',
+      budget_before: line.budget_before !== null && line.budget_before !== undefined ? parseFloat(line.budget_before).toFixed(2) : '',
+      budget_after: line.budget_after !== null && line.budget_after !== undefined ? parseFloat(line.budget_after).toFixed(2) : '',
       status: statusMap[line.status] || line.status,
       validation_error: line.validation_error || '',
       adjustment_id: line.adjustment_id || '',
@@ -781,6 +1023,7 @@ router.get('/:batchId/export', authenticate, requireFinance, async (req, res) =>
     }));
 
     await csvWriter.writeRecords(records);
+    await logOperation(batchId, req.user.id, 'export', `导出类型: ${type}`);
 
     res.download(filepath, filename, (err) => {
       if (err) {

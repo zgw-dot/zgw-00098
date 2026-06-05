@@ -92,9 +92,12 @@
             <div class="filters">
               <select id="batchStatusFilter">
                 <option value="">全部状态</option>
+                <option value="pending">待处理</option>
+                <option value="prechecked">已预检</option>
+                <option value="submitted">已提交</option>
                 <option value="completed">已完成</option>
                 <option value="failed">失败</option>
-                <option value="submitted">已提交</option>
+                <option value="cancelled">已取消</option>
               </select>
               <button id="refreshBatchBtn" class="btn">刷新</button>
             </div>

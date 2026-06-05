@@ -24,6 +24,24 @@ const adjustmentTypeMap = {
   'reversal': { text: '冲正调整', class: 'status-withdrawn' }
 };
 
+const batchStatusMap = {
+  'pending': { text: '待处理', class: 'status-pending' },
+  'prechecked': { text: '已预检', class: 'status-pending' },
+  'submitted': { text: '已提交', class: 'status-approved' },
+  'completed': { text: '已完成', class: 'status-confirmed' },
+  'failed': { text: '失败', class: 'status-rejected' },
+  'cancelled': { text: '已取消', class: 'status-withdrawn' },
+  'valid': { text: '有效', class: 'status-approved' },
+  'invalid': { text: '无效', class: 'status-rejected' }
+};
+
+const operationMap = {
+  'precheck': '预检',
+  'submit': '提交',
+  'cancel': '取消',
+  'export': '导出'
+};
+
 async function apiRequest(url, method = 'GET', body = null) {
   const headers = {
     'Content-Type': 'application/json'
@@ -1104,14 +1122,6 @@ function renderBatches(batches) {
     return;
   }
 
-  const statusMap = {
-    'pending': { text: '待处理', class: 'status-pending' },
-    'prechecked': { text: '已预检', class: 'status-pending' },
-    'submitted': { text: '已提交', class: 'status-approved' },
-    'completed': { text: '已完成', class: 'status-confirmed' },
-    'failed': { text: '失败', class: 'status-rejected' }
-  };
-
   let html = `
     <table>
       <thead>
@@ -1131,7 +1141,11 @@ function renderBatches(batches) {
   `;
 
   for (const batch of batches) {
-    const status = statusMap[batch.status] || { text: batch.status, class: '' };
+    const status = batchStatusMap[batch.status] || { text: batch.status, class: '' };
+    const canCancel = batch.status === 'prechecked' || batch.status === 'pending' || batch.status === 'failed';
+    const canSubmit = batch.status === 'prechecked';
+    const isOwner = batch.user_id === currentUser.id;
+    
     html += `
       <tr>
         <td>${batch.batch_id}</td>
@@ -1144,7 +1158,9 @@ function renderBatches(batches) {
         <td>${new Date(batch.created_at).toLocaleString('zh-CN')}</td>
         <td>
           <button class="btn btn-info btn-sm" onclick="viewBatchDetail('${batch.batch_id}')">详情</button>
-          ${batch.status === 'completed' ? `<button class="btn btn-sm" onclick="exportBatch('${batch.batch_id}')">导出</button>` : ''}
+          <button class="btn btn-sm" onclick="showExportMenu('${batch.batch_id}')">导出</button>
+          ${canCancel && isOwner ? `<button class="btn btn-warning btn-sm" onclick="cancelBatch('${batch.batch_id}')">取消</button>` : ''}
+          ${canSubmit && isOwner ? `<button class="btn btn-success btn-sm" onclick="submitBatchFromList('${batch.batch_id}')">确认</button>` : ''}
         </td>
       </tr>
     `;
@@ -1152,6 +1168,24 @@ function renderBatches(batches) {
 
   html += '</tbody></table>';
   container.innerHTML = html;
+}
+
+function showExportMenu(batchId) {
+  const html = `
+    <div style="padding: 1rem;">
+      <h4 style="margin-bottom: 1rem;">选择导出类型 - ${batchId}</h4>
+      <div style="display: grid; gap: 0.75rem;">
+        <button class="btn btn-primary" onclick="exportBatch('${batchId}', 'all')">全部数据</button>
+        <button class="btn btn-info" onclick="exportBatch('${batchId}', 'precheck')">预检结果</button>
+        <button class="btn btn-success" onclick="exportBatch('${batchId}', 'ledger')">记账结果</button>
+        <button class="btn btn-danger" onclick="exportBatch('${batchId}', 'failed')">失败原因</button>
+      </div>
+      <div style="text-align: right; margin-top: 1.5rem;">
+        <button type="button" class="btn" onclick="closeModal()">取消</button>
+      </div>
+    </div>
+  `;
+  showModal('导出批次数据', html);
 }
 
 function showNewBatchForm() {
@@ -1208,6 +1242,7 @@ async function precheckBatch() {
 
     window.currentPrecheckResult = data;
     renderPrecheckResult(data);
+    showToast('预检完成，结果已保存', 'success');
   } catch (err) {
     console.error('预检失败:', err);
   }
@@ -1239,6 +1274,10 @@ function renderPrecheckResult(data) {
       <div class="detail-row">
         <span class="detail-label">失败</span>
         <span class="detail-value" style="color: #c53030;">${data.invalidRows}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">内容校验</span>
+        <span class="detail-value" style="font-family: monospace; font-size: 0.8rem;">${data.contentHash.substring(0, 16)}...</span>
       </div>
     </div>
     <div style="max-height: 300px; overflow-y: auto;">
@@ -1284,7 +1323,8 @@ function renderPrecheckResult(data) {
       </table>
     </div>
     <div style="text-align: right; margin-top: 1rem;">
-      <button type="button" class="btn" onclick="closeModal()">取消</button>
+      <button type="button" class="btn btn-warning" onclick="cancelBatch('${data.batchId}')">取消批次</button>
+      <button type="button" class="btn" onclick="closeModal()">关闭</button>
       ${data.allValid ? `<button type="button" class="btn btn-primary" onclick="submitBatch()">确认提交</button>` : ''}
     </div>
   `;
@@ -1305,7 +1345,8 @@ async function submitBatch() {
   try {
     const data = await apiRequest('/budget-batches/submit', 'POST', {
       batchId: window.currentPrecheckResult.batchId,
-      rows: window.currentPrecheckResult.results
+      rows: window.currentPrecheckResult.results,
+      contentHash: window.currentPrecheckResult.contentHash
     });
 
     showToast('批次提交成功', 'success');
@@ -1318,27 +1359,67 @@ async function submitBatch() {
   }
 }
 
+async function submitBatchFromList(batchId) {
+  if (!confirm(`确定要提交批次 ${batchId} 吗？提交后将按批次事务处理，不可撤销。`)) {
+    return;
+  }
+
+  try {
+    const detailData = await apiRequest(`/budget-batches/${batchId}`);
+    const rows = detailData.lines.map(l => ({
+      lineNumber: l.line_number,
+      department: l.department_name || l.department,
+      type: l.adjustment_type === 'increase' ? '追加' : '调减',
+      amount: l.amount,
+      reason: l.reason
+    }));
+
+    const data = await apiRequest('/budget-batches/submit', 'POST', {
+      batchId,
+      rows,
+      contentHash: detailData.batch.content_hash
+    });
+
+    showToast('批次提交成功', 'success');
+    loadBatches();
+    loadDepartments();
+    loadAdjustments();
+  } catch (err) {
+    console.error('提交失败:', err);
+  }
+}
+
+async function cancelBatch(batchId) {
+  const reason = prompt('请输入取消原因（可选）：');
+  if (reason === null) return;
+
+  if (!confirm(`确定要取消批次 ${batchId} 吗？取消后不能恢复。`)) {
+    return;
+  }
+
+  try {
+    await apiRequest(`/budget-batches/${batchId}/cancel`, 'POST', { reason: reason || '用户取消' });
+    showToast('批次已取消', 'success');
+    closeModal();
+    loadBatches();
+  } catch (err) {
+    console.error('取消失败:', err);
+  }
+}
+
 async function viewBatchDetail(batchId) {
   try {
     const data = await apiRequest(`/budget-batches/${batchId}`);
-    renderBatchDetail(data.batch, data.lines);
+    renderBatchDetail(data.batch, data.lines, data.operations);
   } catch (err) {
     console.error('加载批次详情失败:', err);
   }
 }
 
-function renderBatchDetail(batch, lines) {
-  const statusMap = {
-    'pending': { text: '待处理', class: 'status-pending' },
-    'prechecked': { text: '已预检', class: 'status-pending' },
-    'submitted': { text: '已提交', class: 'status-approved' },
-    'completed': { text: '已完成', class: 'status-confirmed' },
-    'failed': { text: '失败', class: 'status-rejected' },
-    'valid': { text: '有效', class: 'status-approved' },
-    'invalid': { text: '无效', class: 'status-rejected' }
-  };
-
-  const status = statusMap[batch.status] || { text: batch.status, class: '' };
+function renderBatchDetail(batch, lines, operations) {
+  const status = batchStatusMap[batch.status] || { text: batch.status, class: '' };
+  const canCancel = (batch.status === 'prechecked' || batch.status === 'pending' || batch.status === 'failed') && batch.user_id === currentUser.id;
+  const canSubmit = batch.status === 'prechecked' && batch.user_id === currentUser.id;
 
   let html = `
     <div class="detail-section" style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid #e2e8f0;">
@@ -1370,6 +1451,12 @@ function renderBatchDetail(batch, lines) {
         <span class="detail-label">总金额</span>
         <span class="detail-value">¥${formatCurrency(batch.total_amount)}</span>
       </div>
+      ${batch.content_hash ? `
+      <div class="detail-row">
+        <span class="detail-label">内容哈希</span>
+        <span class="detail-value" style="font-family: monospace; font-size: 0.8rem;">${batch.content_hash}</span>
+      </div>
+      ` : ''}
       ${batch.error_message ? `
       <div class="detail-row">
         <span class="detail-label">错误信息</span>
@@ -1380,7 +1467,33 @@ function renderBatchDetail(batch, lines) {
         <span class="detail-label">创建时间</span>
         <span class="detail-value">${new Date(batch.created_at).toLocaleString('zh-CN')}</span>
       </div>
+      <div class="detail-row">
+        <span class="detail-label">更新时间</span>
+        <span class="detail-value">${new Date(batch.updated_at).toLocaleString('zh-CN')}</span>
+      </div>
     </div>
+  `;
+
+  if (operations && operations.length > 0) {
+    html += '<div class="detail-section" style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid #e2e8f0;">';
+    html += '<h4 style="margin-bottom: 0.5rem;">操作日志</h4>';
+    html += '<div class="timeline">';
+    for (const op of operations) {
+      html += `
+        <div class="timeline-item">
+          <div>
+            <div class="timeline-action">${operationMap[op.operation] || op.operation}</div>
+            <div class="timeline-user">操作人: ${op.user_name}</div>
+            <div class="timeline-time">${new Date(op.created_at).toLocaleString('zh-CN')}</div>
+            ${op.remark ? `<div class="timeline-remark">${op.remark}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+    html += '</div></div>';
+  }
+
+  html += `
     <h4 style="margin-bottom: 0.5rem;">明细行</h4>
     <div style="max-height: 300px; overflow-y: auto;">
       <table>
@@ -1390,6 +1503,8 @@ function renderBatchDetail(batch, lines) {
             <th>部门</th>
             <th>类型</th>
             <th>金额</th>
+            <th>当前预算</th>
+            <th>预计调整后</th>
             <th>调整前</th>
             <th>调整后</th>
             <th>原因</th>
@@ -1403,34 +1518,49 @@ function renderBatchDetail(batch, lines) {
   const typeMap = { 'increase': '追加', 'decrease': '调减' };
 
   for (const line of lines) {
-    const lineStatus = statusMap[line.status] || { text: line.status, class: '' };
+    const lineStatus = batchStatusMap[line.status] || { text: line.status, class: '' };
     html += `
       <tr>
         <td>${line.line_number}</td>
         <td>${line.department_name || line.department}</td>
         <td>${typeMap[line.adjustment_type] || line.adjustment_type}</td>
         <td>¥${formatCurrency(line.amount)}</td>
-        <td>${line.budget_before !== null ? '¥' + formatCurrency(line.budget_before) : '-'}</td>
-        <td>${line.budget_after !== null ? '¥' + formatCurrency(line.budget_after) : '-'}</td>
+        <td>${line.current_budget !== null && line.current_budget !== undefined ? '¥' + formatCurrency(line.current_budget) : '-'}</td>
+        <td>${line.expected_budget_after !== null && line.expected_budget_after !== undefined ? '¥' + formatCurrency(line.expected_budget_after) : '-'}</td>
+        <td>${line.budget_before !== null && line.budget_before !== undefined ? '¥' + formatCurrency(line.budget_before) : '-'}</td>
+        <td>${line.budget_after !== null && line.budget_after !== undefined ? '¥' + formatCurrency(line.budget_after) : '-'}</td>
         <td>${line.reason}</td>
         <td><span class="status-badge ${lineStatus.class}">${lineStatus.text}</span></td>
         <td>${line.adjustment_id || '-'}</td>
       </tr>
     `;
+    if (line.validation_error) {
+      html += `
+        <tr style="background: #fff5f5;">
+          <td colspan="11" style="color: #c53030; font-size: 0.85rem;">错误: ${line.validation_error}</td>
+        </tr>
+      `;
+    }
   }
 
   html += `
         </tbody>
       </table>
     </div>
+    <div style="text-align: right; margin-top: 1rem;">
+      <button type="button" class="btn btn-info" onclick="showExportMenu('${batch.batch_id}')">导出</button>
+      ${canCancel ? `<button type="button" class="btn btn-warning" onclick="cancelBatch('${batch.batch_id}')">取消批次</button>` : ''}
+      ${canSubmit ? `<button type="button" class="btn btn-success" onclick="submitBatchFromList('${batch.batch_id}')">确认提交</button>` : ''}
+      <button type="button" class="btn" onclick="closeModal()">关闭</button>
+    </div>
   `;
 
   showModal(`批次详情 - ${batch.batch_id}`, html);
 }
 
-async function exportBatch(batchId) {
+async function exportBatch(batchId, type = 'all') {
   try {
-    const res = await fetch(API_BASE + `/budget-batches/${batchId}/export`, {
+    const res = await fetch(API_BASE + `/budget-batches/${batchId}/export?type=${type}`, {
       headers: { 'Authorization': `Bearer ${token}` }
     });
     
@@ -1443,13 +1573,14 @@ async function exportBatch(batchId) {
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `batch-${batchId}-${Date.now()}.csv`;
+    a.download = `batch-${batchId}-${type}-${Date.now()}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     window.URL.revokeObjectURL(url);
     
     showToast('批次导出成功', 'success');
+    closeModal();
   } catch (err) {
     showToast(err.message, 'error');
   }
@@ -1467,8 +1598,11 @@ window.showReversalForm = showReversalForm;
 window.showNewBatchForm = showNewBatchForm;
 window.precheckBatch = precheckBatch;
 window.submitBatch = submitBatch;
+window.submitBatchFromList = submitBatchFromList;
+window.cancelBatch = cancelBatch;
 window.viewBatchDetail = viewBatchDetail;
 window.exportBatch = exportBatch;
+window.showExportMenu = showExportMenu;
 
 if (token && currentUser) {
   apiRequest('/auth/me').then(() => {

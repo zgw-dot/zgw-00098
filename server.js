@@ -63,11 +63,14 @@ app.listen(port, () => {
 ║     POST /api/budget-adjustments/:id/reverse - 财务冲正调整     ║
 ║     GET  /api/budget-adjustments          - 预算调整历史记录     ║
 ║     GET  /api/budget-adjustments/:id      - 调整记录详情       ║
-║     POST /api/budget-batches/precheck     - 批量调整预检         ║
-║     POST /api/budget-batches/submit     - 批量调整提交         ║
-║     GET  /api/budget-batches          - 批次列表             ║
-║     GET  /api/budget-batches/:id      - 批次详情             ║
-║     GET  /api/budget-batches/:id/export - 批次导出CSV     ║
+║     POST /api/budget-batches/precheck        - 批量调整预检(持久化) ║
+║     POST /api/budget-batches/submit          - 批量调整提交         ║
+║     POST /api/budget-batches/:batchId/cancel - 取消批次             ║
+║     GET  /api/budget-batches                 - 批次列表(支持筛选)    ║
+║     GET  /api/budget-batches/:id             - 批次详情(含操作日志)  ║
+║     GET  /api/budget-batches/:id/operations  - 批次操作日志         ║
+║     GET  /api/budget-batches/:id/export      - 批次导出CSV(多类型)  ║
+║           ?type=all|precheck|ledger|failed                        ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
   `);

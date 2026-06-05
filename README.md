@@ -752,9 +752,273 @@ curl -s -OJ http://localhost:3000/api/ledger/export \
   -H "Authorization: Bearer $FIN_TOKEN"
 ```
 
-## 批量导入功能验证
+## 批次工作台功能验证（v2.0）
+
+### 数据库表升级说明
+
+升级后的表结构支持完整的批次生命周期管理和操作审计：
+
+#### budget_batches（批次表）新增字段
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| status | TEXT | 新增 `cancelled` 状态，完整状态: pending/prechecked/submitted/failed/completed/cancelled |
+| content_hash | TEXT | SHA-256 内容哈希，防止预检后篡改数据 |
+
+#### 新增 budget_batch_operations（操作日志表）
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| batch_id | TEXT | 批次号（外键） |
+| user_id | INTEGER | 操作人ID |
+| operation | TEXT | 操作类型: precheck/submit/cancel/export |
+| remark | TEXT | 操作备注 |
+| created_at | DATETIME | 操作时间 |
+
+#### budget_batch_lines（批次行表）新增字段
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| current_budget | DECIMAL | 预检时的当前预算 |
+| expected_budget_after | DECIMAL | 预检时的预计调整后预算 |
 
 ### 运行自动化测试脚本
+
+项目包含完整的自动化测试脚本，覆盖所有要求的场景：
+
+```bash
+# 综合工作流验证（推荐）
+node test-batch-workflow.js
+
+# 旧版批量导入测试（兼容）
+node test-batch-import.js
+```
+
+测试脚本覆盖以下 10 个部分，共 30+ 个测试点：
+
+| 部分 | 说明 |
+|------|------|
+| 1. 基础登录与权限 | 财务用户登录、申请人登录、非财务用户预检被拒绝 |
+| 2. 预检持久化测试 | 全部通过持久化、按状态查询、明细查询、失败状态持久化 |
+| 3. 内容篡改检测 | 修改金额被拒绝、修改部门被拒绝、错误码 CONTENT_MISMATCH |
+| 4. 重复提交与状态校验 | 直接提交未预检批次、提交failed状态批次被拒绝 |
+| 5. 取消批次功能 | 取消已预检批次、取消后禁止提交、非创建者不能取消、已完成不能取消 |
+| 6. 正常提交流程 | 完整提交成功、重复提交检测、操作日志完整、部门预算正确更新 |
+| 7. 状态筛选功能 | 按prechecked/completed/cancelled筛选、按批次号模糊搜索 |
+| 8. 导出功能 | 4种导出类型（all/precheck/ledger/failed）、内容核对 |
+| 9. 服务重启验证 | 重启后状态/明细/日志保持不变 |
+| 10. API文档验证 | 健康检查、错误码完整性 |
+
+### 新增接口说明
+
+#### 取消批次
+```bash
+POST /api/budget-batches/:batchId/cancel
+Authorization: Bearer <finance_token>
+Content-Type: application/json
+
+{
+  "reason": "取消原因说明"
+}
+
+# 成功响应
+{
+  "success": true,
+  "batch": { "status": "cancelled", ... }
+}
+
+# 失败响应（已取消）
+HTTP 409
+{ "code": "BATCH_CANCELLED", "error": "批次已取消" }
+
+# 失败响应（已处理）
+HTTP 409
+{ "code": "BATCH_ALREADY_PROCESSED", "error": "批次已处理完成，无法取消" }
+
+# 失败响应（无权限）
+HTTP 403
+{ "code": "PERMISSION_DENIED", "error": "只能操作自己创建的批次" }
+```
+
+#### 查询操作日志
+```bash
+GET /api/budget-batches/:batchId/operations
+Authorization: Bearer <token>
+
+# 响应
+{
+  "operations": [
+    {
+      "id": 1,
+      "batch_id": "BATCH-001",
+      "operation": "precheck",
+      "user_name": "qianqi",
+      "remark": "预检通过",
+      "created_at": "2024-01-15T10:30:00Z"
+    },
+    {
+      "id": 2,
+      "batch_id": "BATCH-001",
+      "operation": "submit",
+      "user_name": "qianqi",
+      "remark": "提交成功",
+      "created_at": "2024-01-15T10:31:00Z"
+    }
+  ]
+}
+```
+
+#### 多类型导出
+```bash
+GET /api/budget-batches/:batchId/export?type=all
+Authorization: Bearer <finance_token>
+
+# type 参数:
+# - all: 全部数据（默认）
+# - precheck: 预检结果（包含预计余额）
+# - ledger: 记账结果（包含调整记录ID）
+# - failed: 仅失败原因（包含错误信息）
+```
+
+### 手动验证步骤
+
+#### 场景 1：预检持久化验证
+
+**步骤：**
+1. 初始化数据库：`npm run init`
+2. 启动服务：`npm start`
+3. 登录财务账号 (qianqi / 123456)
+4. 点击「批次工作台」→「新建批次」
+5. 输入批次号：`TEST-PERSIST-001`
+6. 输入CSV内容：
+```
+部门,类型,金额,原因
+技术部,追加,50000,Q2设备采购预算
+市场部,调减,20000,活动预算结余回收
+```
+7. 点击「预检」
+8. 预期结果：
+   - 状态显示「已预检」
+   - 显示 contentHash 校验码
+   - 显示每行的当前预算和预计调整后预算
+9. 在批次列表中按状态筛选「已预检」，确认批次存在
+10. 重启服务（Ctrl+C → npm start）
+11. 重新登录，查看批次列表
+12. 预期结果：
+    - 批次仍为「已预检」状态
+    - 明细数据完整
+    - 操作日志显示「预检」记录
+
+#### 场景 2：内容篡改验证
+
+**步骤：**
+1. 基于场景1的批次，点击「查看明细」
+2. 尝试在提交前修改其中一行的金额（通过浏览器开发者工具或直接构造请求）
+3. 点击「确认提交」
+4. 预期结果：
+   - 返回 JSON 错误：`{"code": "CONTENT_MISMATCH", "error": "提交内容与预检内容不一致，可能已被篡改"}`
+   - 状态码 400
+   - 批次状态仍为「已预检」
+   - 部门预算未变化
+
+#### 场景 3：取消后禁止确认验证
+
+**步骤：**
+1. 创建新批次 `TEST-CANCEL-001`，预检通过
+2. 在批次列表中点击「取消」
+3. 输入取消原因，确认取消
+4. 预期结果：
+   - 批次状态变为「已取消」
+   - 操作日志新增「取消」记录
+5. 尝试再次提交该批次
+6. 预期结果：
+   - 返回 JSON 错误：`{"code": "BATCH_CANCELLED", "error": "批次已取消，无法提交"}`
+   - 状态码 409
+
+#### 场景 4：权限验证
+
+**步骤：**
+1. 登录申请人账号 (zhangsan / 123456)
+2. 尝试调用预检接口：
+```bash
+ZHANGSAN_TOKEN=$(curl -s -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"zhangsan","password":"123456"}' | jq -r .token)
+
+curl -s -X POST http://localhost:3000/api/budget-batches/precheck \
+  -H "Authorization: Bearer $ZHANGSAN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"batchId":"TEST-PERM-001","rows":[{"department":"技术部","type":"追加","amount":"10000","reason":"测试"}]}'
+```
+3. 预期结果：返回 JSON `{"code": "PERMISSION_DENIED", "error": "需要以下角色之一: finance"}`，状态码 403
+
+#### 场景 5：重复提交验证
+
+**步骤：**
+1. 创建批次 `TEST-DUP-001`，预检通过后成功提交
+2. 预期结果：状态变为「已完成」
+3. 使用相同的批次号和内容再次提交
+4. 预期结果：
+   - 返回 JSON 错误：`{"code": "BATCH_ALREADY_PROCESSED", "error": "批次已处理完成，不能重复提交"}`
+   - 状态码 409
+   - 部门预算未变化
+
+#### 场景 6：导出内容核对
+
+**步骤：**
+1. 找到已完成的批次，点击「导出」
+2. 分别选择4种导出类型：
+   - **全部数据**：包含所有列
+   - **预检结果**：包含「当前预算」「预计调整后」列
+   - **记账结果**：包含「调整前预算」「调整后预算」「调整记录ID」列
+   - **失败原因**：包含「错误信息」列
+3. 打开导出的CSV文件，验证各类型包含对应的列
+
+#### 场景 7：状态流转验证
+
+完整状态流转图：
+```
+pending → prechecked → submitted → completed
+             ↓            ↓
+           failed       failed
+             ↓
+        cancelled (只能从prechecked取消)
+```
+
+**验证各状态间的转换规则：**
+- ✅ pending → prechecked：预检后
+- ✅ prechecked → submitted：提交成功后
+- ✅ prechecked → cancelled：取消后
+- ✅ prechecked → failed：预检有错误时
+- ✅ submitted → completed：全部成功
+- ✅ submitted → failed：部分失败
+- ❌ cancelled → 任何状态：已取消为终态
+- ❌ completed → 任何状态：已完成为终态
+- ❌ failed → submitted：失败批次需要重新预检
+
+### 错误码对照表
+
+| 错误码 | HTTP状态码 | 说明 |
+|--------|-----------|------|
+| MISSING_BATCH_ID | 400 | 缺少批次号 |
+| MISSING_DATA | 400 | 缺少数据 |
+| NO_DATA | 400 | 数据为空 |
+| BATCH_NOT_FOUND | 404 | 批次不存在 |
+| BATCH_NOT_PRECHECKED | 400 | 批次未预检或预检未通过 |
+| BATCH_ALREADY_PROCESSED | 409 | 批次已处理完成 |
+| BATCH_CANCELLED | 409 | 批次已取消 |
+| CONTENT_MODIFIED | 400 | 内容已被修改 |
+| CONTENT_MISMATCH | 400 | 内容哈希不匹配 |
+| PERMISSION_DENIED | 403 | 权限不足 |
+| VALIDATION_FAILED | 400 | 校验失败 |
+| BUDGET_VIOLATION | 400 | 预算违规 |
+| NEGATIVE_BUDGET | 400 | 预算为负 |
+| ALREADY_CANCELLED | 409 | 批次已取消 |
+| CANCEL_FAILED | 500 | 取消失败 |
+| PRECHECK_FAILED | 500 | 预检失败 |
+| SUBMIT_FAILED | 500 | 提交失败 |
+
+## 批量导入功能验证
+
+### 运行自动化测试脚本（旧版兼容）
 
 项目包含完整的自动化测试脚本，覆盖所有要求的场景：
 
