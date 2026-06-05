@@ -1,0 +1,4 @@
+申请编号,部门,申请人,金额,供应商,用途,状态,审批主管,财务确认,创建时间,更新时间
+1,技术部,zhangsan,1234.56,reviewer-main-supplier,reviewer main success path,财务确认,wangwu,qianqi,2026-06-05 07:30:53,2026-06-05 07:30:53
+2,技术部,zhangsan,321,reviewer-self-approve,direct API self approve attempt,已撤回,,,2026-06-05 07:30:53,2026-06-05 07:30:53
+3,技术部,zhangsan,456,reviewer-approved-withdraw,approved withdrawal edge,已撤回,wangwu,,2026-06-05 07:30:53,2026-06-05 07:30:53

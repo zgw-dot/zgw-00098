@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>采购预算审批系统</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <h1>采购预算审批系统</h1>
+      <div id="userInfo" class="user-info"></div>
+    </header>
+
+    <main class="main">
+      <div id="loginView" class="view">
+        <div class="login-box">
+          <h2>用户登录</h2>
+          <form id="loginForm">
+            <div class="form-group">
+              <label>用户名</label>
+              <input type="text" id="username" required>
+            </div>
+            <div class="form-group">
+              <label>密码</label>
+              <input type="password" id="password" required>
+            </div>
+            <button type="submit" class="btn btn-primary">登录</button>
+          </form>
+          <div class="test-accounts">
+            <h3>测试账号（密码均为 123456）</h3>
+            <ul>
+              <li><strong>zhangsan</strong> - 技术部申请人</li>
+              <li><strong>lisi</strong> - 市场部申请人</li>
+              <li><strong>wangwu</strong> - 技术部主管</li>
+              <li><strong>zhaoliu</strong> - 市场部主管</li>
+              <li><strong>qianqi</strong> - 财务</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div id="mainView" class="view hidden">
+        <nav class="tabs">
+          <button class="tab-btn active" data-tab="applications">申请列表</button>
+          <button class="tab-btn" data-tab="budget">部门预算</button>
+          <button class="tab-btn" data-tab="consistency">一致性检查</button>
+          <button class="tab-btn" data-tab="export" id="exportTab">导出账本</button>
+        </nav>
+
+        <div id="applicationsTab" class="tab-content active">
+          <div class="actions-bar">
+            <button id="newApplicationBtn" class="btn btn-primary">+ 新建申请</button>
+            <div class="filters">
+              <select id="statusFilter">
+                <option value="">全部状态</option>
+                <option value="pending">待审批</option>
+                <option value="approved">主管已批</option>
+                <option value="rejected">已驳回</option>
+                <option value="withdrawn">已撤回</option>
+                <option value="confirmed">财务确认</option>
+              </select>
+              <button id="refreshBtn" class="btn">刷新</button>
+            </div>
+          </div>
+          <div id="applicationsList" class="table-container"></div>
+        </div>
+
+        <div id="budgetTab" class="tab-content">
+          <div id="budgetList" class="table-container"></div>
+        </div>
+
+        <div id="consistencyTab" class="tab-content">
+          <button id="checkConsistencyBtn" class="btn btn-primary">执行一致性检查</button>
+          <div id="consistencyResult" class="consistency-result"></div>
+        </div>
+
+        <div id="exportTabContent" class="tab-content">
+          <button id="exportLedgerBtn" class="btn btn-primary">导出 CSV 账本</button>
+          <p class="hint">只有财务角色可以导出账本</p>
+        </div>
+      </div>
+    </main>
+
+    <div id="modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="modalTitle">标题</h3>
+          <span class="close">&times;</span>
+        </div>
+        <div class="modal-body" id="modalBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
