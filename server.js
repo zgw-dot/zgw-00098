@@ -7,6 +7,7 @@ const authRoutes = require('./routes/auth');
 const applicationRoutes = require('./routes/applications');
 const departmentRoutes = require('./routes/departments');
 const ledgerRoutes = require('./routes/ledger');
+const budgetAdjustmentRoutes = require('./routes/budget-adjustments');
 
 const app = express();
 
@@ -18,6 +19,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/applications', applicationRoutes);
 app.use('/api/departments', departmentRoutes);
 app.use('/api/ledger', ledgerRoutes);
+app.use('/api/budget-adjustments', budgetAdjustmentRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -55,6 +57,8 @@ app.listen(port, () => {
 ║     GET  /api/departments            - 部门预算               ║
 ║     GET  /api/ledger/check          - 一致性检查             ║
 ║     GET  /api/ledger/export         - 导出CSV账本            ║
+║     POST /api/budget-adjustments    - 财务调整部门预算       ║
+║     GET  /api/budget-adjustments    - 预算调整历史记录       ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
   `);

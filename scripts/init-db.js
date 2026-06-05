@@ -87,6 +87,25 @@ db.serialize(() => {
     else console.log('✓ timeline 表创建成功');
   });
 
+  db.run(`
+    CREATE TABLE budget_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      department_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      adjustment_type TEXT NOT NULL CHECK(adjustment_type IN ('increase', 'decrease')),
+      amount DECIMAL(15,2) NOT NULL,
+      budget_before DECIMAL(15,2) NOT NULL,
+      budget_after DECIMAL(15,2) NOT NULL,
+      reason TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (department_id) REFERENCES departments(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `, (err) => {
+    if (err) console.error('创建 budget_adjustments 表失败:', err);
+    else console.log('✓ budget_adjustments 表创建成功');
+  });
+
   const stmtUser = db.prepare('INSERT INTO users (username, password_hash, role, department) VALUES (?, ?, ?, ?)');
   const stmtDept = db.prepare('INSERT INTO departments (name, budget_total) VALUES (?, ?)');
 

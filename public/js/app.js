@@ -18,6 +18,11 @@ const actionMap = {
   'confirm': '财务确认'
 };
 
+const adjustmentTypeMap = {
+  'increase': { text: '追加预算', class: 'status-approved' },
+  'decrease': { text: '调减预算', class: 'status-rejected' }
+};
+
 async function apiRequest(url, method = 'GET', body = null) {
   const headers = {
     'Content-Type': 'application/json'
@@ -108,6 +113,14 @@ function renderUserInfo() {
   } else {
     document.getElementById('newApplicationBtn').style.display = 'inline-block';
   }
+
+  if (currentUser.role !== 'finance') {
+    document.getElementById('budgetAdjustmentsTab').style.display = 'none';
+    document.getElementById('newAdjustmentBtn').style.display = 'none';
+  } else {
+    document.getElementById('budgetAdjustmentsTab').style.display = 'inline-block';
+    document.getElementById('newAdjustmentBtn').style.display = 'inline-block';
+  }
 }
 
 function showLoginView() {
@@ -122,6 +135,10 @@ function showMainView() {
   renderUserInfo();
   loadApplications();
   loadDepartments();
+  if (currentUser.role === 'finance') {
+    loadAdjustments();
+    loadDeptFilter();
+  }
 }
 
 async function loadApplications(status = '') {
@@ -416,6 +433,8 @@ function renderDepartments(departments) {
           <th>已使用</th>
           <th>锁定中</th>
           <th>可用余额</th>
+          <th>调整次数</th>
+          ${currentUser.role === 'finance' ? '<th>操作</th>' : ''}
         </tr>
       </thead>
       <tbody>
@@ -429,12 +448,212 @@ function renderDepartments(departments) {
         <td>¥${formatCurrency(dept.budget_used)}</td>
         <td>¥${formatCurrency(dept.budget_locked)}</td>
         <td><strong>¥${formatCurrency(dept.budget_available)}</strong></td>
+        <td>${dept.adjustment_count || 0}</td>
+        ${currentUser.role === 'finance' ? `<td><button class="btn btn-info" onclick="showAdjustmentForm(${dept.id}, '${dept.name}')">调整预算</button></td>` : ''}
       </tr>
     `;
   }
 
   html += '</tbody></table>';
   container.innerHTML = html;
+}
+
+async function loadDeptFilter() {
+  try {
+    const data = await apiRequest('/departments');
+    const select = document.getElementById('deptFilter');
+    select.innerHTML = '<option value="">全部部门</option>';
+    for (const dept of data.departments) {
+      select.innerHTML += `<option value="${dept.id}">${dept.name}</option>`;
+    }
+  } catch (err) {
+    console.error('加载部门列表失败:', err);
+  }
+}
+
+async function loadAdjustments(departmentId = '') {
+  try {
+    const url = departmentId ? `/budget-adjustments?departmentId=${departmentId}` : '/budget-adjustments';
+    const data = await apiRequest(url);
+    renderAdjustments(data.adjustments);
+  } catch (err) {
+    console.error('加载调整记录失败:', err);
+  }
+}
+
+function renderAdjustments(adjustments) {
+  const container = document.getElementById('adjustmentsList');
+
+  if (adjustments.length === 0) {
+    container.innerHTML = '<div class="empty-state">暂无预算调整记录</div>';
+    return;
+  }
+
+  let html = `
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>部门</th>
+          <th>类型</th>
+          <th>调整金额</th>
+          <th>调整前</th>
+          <th>调整后</th>
+          <th>操作人</th>
+          <th>原因</th>
+          <th>时间</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const adj of adjustments) {
+    const typeInfo = adjustmentTypeMap[adj.adjustment_type] || { text: adj.adjustment_type, class: '' };
+    const amountDisplay = adj.adjustment_type === 'increase'
+      ? `+¥${formatCurrency(adj.amount)}`
+      : `-¥${formatCurrency(adj.amount)}`;
+
+    html += `
+      <tr>
+        <td>${adj.id}</td>
+        <td>${adj.department_name}</td>
+        <td><span class="status-badge ${typeInfo.class}">${typeInfo.text}</span></td>
+        <td>${amountDisplay}</td>
+        <td>¥${formatCurrency(adj.budget_before)}</td>
+        <td>¥${formatCurrency(adj.budget_after)}</td>
+        <td>${adj.user_name}</td>
+        <td>${adj.reason}</td>
+        <td>${new Date(adj.created_at).toLocaleString('zh-CN')}</td>
+      </tr>
+    `;
+  }
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function showAdjustmentForm(departmentId, departmentName) {
+  const html = `
+    <form id="adjustmentForm">
+      <div class="form-group">
+        <label>部门</label>
+        <input type="text" id="adjDeptName" value="${departmentName}" disabled>
+      </div>
+      <div class="form-group">
+        <label>调整类型</label>
+        <select id="adjType" required>
+          <option value="increase">追加预算</option>
+          <option value="decrease">调减预算</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>调整金额</label>
+        <input type="number" id="adjAmount" step="0.01" min="0.01" required placeholder="请输入调整金额">
+      </div>
+      <div class="form-group">
+        <label>调整原因</label>
+        <textarea id="adjReason" rows="3" required placeholder="请详细说明调整原因"></textarea>
+      </div>
+      <div style="text-align: right; margin-top: 1rem;">
+        <button type="button" class="btn" onclick="closeModal()">取消</button>
+        <button type="submit" class="btn btn-primary">确认调整</button>
+      </div>
+    </form>
+  `;
+
+  showModal(`调整 ${departmentName} 预算`, html);
+
+  document.getElementById('adjustmentForm').onsubmit = async (e) => {
+    e.preventDefault();
+
+    const adjustmentType = document.getElementById('adjType').value;
+    const amount = parseFloat(document.getElementById('adjAmount').value);
+    const reason = document.getElementById('adjReason').value.trim();
+
+    try {
+      await apiRequest('/budget-adjustments', 'POST', {
+        departmentId,
+        adjustmentType,
+        amount,
+        reason
+      });
+      showToast('预算调整成功', 'success');
+      closeModal();
+      loadDepartments();
+      loadAdjustments(document.getElementById('deptFilter').value);
+    } catch (err) {
+      console.error('调整失败:', err);
+    }
+  };
+}
+
+function showNewAdjustmentForm() {
+  const html = `
+    <form id="adjustmentForm">
+      <div class="form-group">
+        <label>部门</label>
+        <select id="adjDeptId" required></select>
+      </div>
+      <div class="form-group">
+        <label>调整类型</label>
+        <select id="adjType" required>
+          <option value="increase">追加预算</option>
+          <option value="decrease">调减预算</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>调整金额</label>
+        <input type="number" id="adjAmount" step="0.01" min="0.01" required placeholder="请输入调整金额">
+      </div>
+      <div class="form-group">
+        <label>调整原因</label>
+        <textarea id="adjReason" rows="3" required placeholder="请详细说明调整原因"></textarea>
+      </div>
+      <div style="text-align: right; margin-top: 1rem;">
+        <button type="button" class="btn" onclick="closeModal()">取消</button>
+        <button type="submit" class="btn btn-primary">确认调整</button>
+      </div>
+    </form>
+  `;
+
+  showModal('调整部门预算', html);
+
+  apiRequest('/departments').then(data => {
+    const select = document.getElementById('adjDeptId');
+    select.innerHTML = '<option value="">请选择部门</option>';
+    for (const dept of data.departments) {
+      select.innerHTML += `<option value="${dept.id}">${dept.name}</option>`;
+    }
+  });
+
+  document.getElementById('adjustmentForm').onsubmit = async (e) => {
+    e.preventDefault();
+
+    const departmentId = parseInt(document.getElementById('adjDeptId').value);
+    const adjustmentType = document.getElementById('adjType').value;
+    const amount = parseFloat(document.getElementById('adjAmount').value);
+    const reason = document.getElementById('adjReason').value.trim();
+
+    if (!departmentId) {
+      showToast('请选择部门', 'error');
+      return;
+    }
+
+    try {
+      await apiRequest('/budget-adjustments', 'POST', {
+        departmentId,
+        adjustmentType,
+        amount,
+        reason
+      });
+      showToast('预算调整成功', 'success');
+      closeModal();
+      loadDepartments();
+      loadAdjustments(document.getElementById('deptFilter').value);
+    } catch (err) {
+      console.error('调整失败:', err);
+    }
+  };
 }
 
 async function checkConsistency() {
@@ -495,6 +714,20 @@ function renderConsistencyResult(result) {
         <span class="detail-label">申请总数</span>
         <span class="detail-value">${result.summary.application_count}</span>
       </div>
+      ${result.summary.budget_adjustment_count > 0 ? `
+      <div class="detail-row">
+        <span class="detail-label">预算调整次数</span>
+        <span class="detail-value">${result.summary.budget_adjustment_count}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">累计追加</span>
+        <span class="detail-value" style="color: #2b6cb0;">+¥${formatCurrency(result.summary.total_adjustments_increase)}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">累计调减</span>
+        <span class="detail-value" style="color: #c53030;">-¥${formatCurrency(result.summary.total_adjustments_decrease)}</span>
+      </div>
+      ` : ''}
     </div>
   `;
 
@@ -503,10 +736,11 @@ function renderConsistencyResult(result) {
       <h4>部门预算明细</h4>
       <div class="consistency-grid">
         ${result.departments.map(d => `
-          <div class="consistency-card ${d.used_consistent && d.locked_consistent ? 'success' : 'error'}">
+          <div class="consistency-card ${d.used_consistent && d.locked_consistent && d.budget_total_consistent ? 'success' : 'error'}">
             <strong>${d.name}</strong>
             <div style="font-size: 0.85rem; margin-top: 0.5rem;">
-              总预算: ¥${formatCurrency(d.budget_total)}<br>
+              总预算: ¥${formatCurrency(d.budget_total)} 
+              ${d.budget_total_consistent !== undefined ? (d.budget_total_consistent ? '✓' : '✗ (计算值 ' + formatCurrency(d.calculated_budget_total) + ')') : ''}<br>
               已使用: ¥${formatCurrency(d.budget_used)} 
               ${d.used_consistent ? '✓' : '✗ (应为 ' + formatCurrency(d.expected_used) + ')'}<br>
               锁定中: ¥${formatCurrency(d.budget_locked)} 
@@ -518,6 +752,29 @@ function renderConsistencyResult(result) {
       </div>
     </div>
   `;
+
+  if (result.budgetAdjustments && result.budgetAdjustments.length > 0) {
+    html += `
+      <div class="consistency-section">
+        <h4>预算调整明细 (${result.budgetAdjustments.length})</h4>
+        <div class="consistency-grid">
+          ${result.budgetAdjustments.map(a => `
+            <div class="consistency-card ${a.amount_consistent ? 'success' : 'error'}">
+              <strong>${a.department} - ${adjustmentTypeMap[a.adjustment_type]?.text || a.adjustment_type}</strong>
+              <div style="font-size: 0.85rem; margin-top: 0.5rem;">
+                金额: ${a.adjustment_type === 'increase' ? '+' : '-'}¥${formatCurrency(a.amount)}<br>
+                调整前: ¥${formatCurrency(a.budget_before)}<br>
+                调整后: ¥${formatCurrency(a.budget_after)} 
+                ${a.amount_consistent ? '✓' : '✗ (应为 ' + formatCurrency(a.expected_after) + ')'}<br>
+                操作人: ${a.user_name}<br>
+                原因: ${a.reason}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
 
   html += `
     <div class="consistency-section">
@@ -598,6 +855,9 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     
     if (tab === 'applications') loadApplications();
     if (tab === 'budget') loadDepartments();
+    if (tab === 'budgetAdjustments' && currentUser.role === 'finance') {
+      loadAdjustments(document.getElementById('deptFilter').value);
+    }
   };
 });
 
@@ -606,6 +866,9 @@ document.getElementById('refreshBtn').onclick = () => loadApplications(document.
 document.getElementById('statusFilter').onchange = (e) => loadApplications(e.target.value);
 document.getElementById('checkConsistencyBtn').onclick = checkConsistency;
 document.getElementById('exportLedgerBtn').onclick = exportLedger;
+document.getElementById('newAdjustmentBtn').onclick = showNewAdjustmentForm;
+document.getElementById('refreshAdjBtn').onclick = () => loadAdjustments(document.getElementById('deptFilter').value);
+document.getElementById('deptFilter').onchange = (e) => loadAdjustments(e.target.value);
 document.querySelector('.close').onclick = closeModal;
 
 document.getElementById('modal').onclick = (e) => {
@@ -618,6 +881,7 @@ window.approveApplication = approveApplication;
 window.rejectApplication = rejectApplication;
 window.confirmApplication = confirmApplication;
 window.closeModal = closeModal;
+window.showAdjustmentForm = showAdjustmentForm;
 
 if (token && currentUser) {
   apiRequest('/auth/me').then(() => {

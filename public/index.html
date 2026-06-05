@@ -45,6 +45,7 @@
         <nav class="tabs">
           <button class="tab-btn active" data-tab="applications">申请列表</button>
           <button class="tab-btn" data-tab="budget">部门预算</button>
+          <button class="tab-btn" data-tab="budgetAdjustments" id="budgetAdjustmentsTab">预算调整</button>
           <button class="tab-btn" data-tab="consistency">一致性检查</button>
           <button class="tab-btn" data-tab="export" id="exportTab">导出账本</button>
         </nav>
@@ -69,6 +70,19 @@
 
         <div id="budgetTab" class="tab-content">
           <div id="budgetList" class="table-container"></div>
+        </div>
+
+        <div id="budgetAdjustmentsTab" class="tab-content">
+          <div class="actions-bar">
+            <button id="newAdjustmentBtn" class="btn btn-primary">+ 调整预算</button>
+            <div class="filters">
+              <select id="deptFilter">
+                <option value="">全部部门</option>
+              </select>
+              <button id="refreshAdjBtn" class="btn">刷新</button>
+            </div>
+          </div>
+          <div id="adjustmentsList" class="table-container"></div>
         </div>
 
         <div id="consistencyTab" class="tab-content">
